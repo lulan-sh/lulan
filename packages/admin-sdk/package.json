@@ -1,8 +1,9 @@
 {
   "name": "@lulan/admin-sdk",
   "version": "0.7.5",
-  "description": "Typed TypeScript client for the Lulan admin operations API — staff RBAC, network & schedule management, fare publishing, manifests, refunds.",
+  "description": "Typed TypeScript client for the Lulan admin operations API — staff RBAC, network & schedule management, fare publishing, manifests, refunds. For ferry, bus, shuttle and regional airline operators.",
   "license": "Apache-2.0",
+  "keywords": ["lulan", "reservation", "booking-engine", "transit", "ferry", "bus", "admin-api", "operations", "sdk"],
   "repository": {
     "type": "git",
     "url": "https://github.com/thinkgrid-labs/lulan.git",

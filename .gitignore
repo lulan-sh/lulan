@@ -16,3 +16,5 @@ dist/
 # docs/launch/ (GTM notes, video script, post drafts) is internal too.
 docs/*
 !docs/benchmarks.md
+
+.diffmind

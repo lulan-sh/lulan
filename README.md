@@ -1,14 +1,24 @@
-# Lulan — Open-source Headless Reservation Infrastructure for Modern Transit.
+# Lulan — Open-source Headless Reservation Infrastructure for Transit
 
 [![CI](https://github.com/thinkgrid-labs/lulan/actions/workflows/ci.yml/badge.svg)](https://github.com/thinkgrid-labs/lulan/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 
-**Lulan is an open-source, API-first reservation platform for airlines, buses, ferries, rail, and any operator that sells capacity instead of products.** It runs in two modes behind one API: a **complete standalone booking engine** — inventory, pricing, payments, QR ticketing, offline validation, end to end — or an **orchestration layer** that owns the customer-facing reservation experience and synchronizes confirmed bookings into the operational systems you already run (airline PSS, ferry manifest backend, bus dispatch) through sync connectors.
+**Lulan is an open-source, API-first reservation platform that runs in two modes behind one API.** As a **complete standalone booking engine** it is the entire system — search, seat inventory, pricing, payments, QR ticketing, offline boarding — for ferry and RoRo lines, intercity and provincial bus, shuttle and charter fleets, rail, and small regional airlines. As an **orchestration layer** it owns the customer-facing reservation experience and synchronizes confirmed bookings into the operational systems you already run (airline PSS, ferry manifest backend, bus dispatch) through sync connectors.
 
-Built in Rust: segment-aware seat inventory, race-free reservations under high concurrency, event-sourced order lifecycle, a sandboxed WebAssembly pricing engine, and cryptographically signed QR tickets that validate **fully offline**.
+Here is the problem it exists to solve — and the reason a general-purpose e-commerce cart cannot:
 
-Think of commerce tools, but for seats, cabins, vehicle slots, and cargo holds" — inventory that exists in **space and time**, not on a shelf.
+```
+A ─── B ─── C ─── D        Seat 12A on one departure:
+
+A → B   Reserved           the same physical seat is sold inventory
+B → C   Available          on one journey segment and open capacity
+C → D   Reserved           on the next.
+```
+
+Selling that seat means atomically claiming a **span of segments** on a **specific departure**, while hundreds of other buyers race you for the same span. Lulan's invariant harness fires **10,000 simultaneous contenders at 52 seats and records zero double-sells** — including with Redis killed mid-run.
+
+Built in Rust: segment-aware inventory, race-free reservations under high concurrency, an event-sourced order lifecycle, a sandboxed WebAssembly pricing engine, and Ed25519 QR tickets that verify at the gate **with the server switched off**.
 
 ---
 
@@ -30,17 +40,9 @@ Think of commerce tools, but for seats, cabins, vehicle slots, and cargo holds" 
 
 ## Why an open-source transit reservation system?
 
-Most transportation operators still run on legacy reservation software: expensive licenses, proprietary lock-in, monolithic deployments, and booking conflicts the moment demand spikes. General-purpose e-commerce platforms don't help — they assume inventory is static. Transit inventory isn't:
+Most transportation operators still run on legacy reservation software: expensive licenses, proprietary lock-in, monolithic deployments, and booking conflicts the moment demand spikes. General-purpose e-commerce platforms don't help — they assume inventory is static, sitting on a shelf. Transit inventory exists in **space and time**: a seat is a different product on every segment of every departure, it is contended by everyone searching that route at once, and it stops existing the moment the vehicle leaves.
 
-```
-A ─── B ─── C ─── D        Seat 12A on one departure:
-
-A → B   Reserved           the same physical seat is sold inventory
-B → C   Available          on one journey segment and open capacity
-C → D   Reserved           on the next.
-```
-
-Selling a seat means atomically claiming a **span of segments** on a **specific departure**, while hundreds of other buyers race you for the same span. Lulan is a reservation engine built for exactly that problem — and it is verified, not just claimed: the invariant harness fires **10,000 simultaneous contenders at 52 seats and records zero double-sells**, including with Redis killed mid-run.
+That is the whole design brief. Everything below — the segment bitmasks, the guarded claims, the signed quotes, the boarding passes that verify offline — falls out of it.
 
 ## Key features
 
@@ -371,28 +373,11 @@ Real numbers, adversarial shapes, published in [`docs/benchmarks.md`](docs/bench
 
 ## Use cases
 
-Lulan models any business that reserves **capacity over space and time**: regional and low-cost airlines, intercity and commuter bus lines, ferries and RoRo vessels, rail and metro networks, shuttle and van fleets, cargo and parcel space and vehicle-deck slots
+Lulan is built for operators that sell **capacity over space and time**: ferries and RoRo vessels, intercity and commuter bus lines, shuttle and van fleets, charters, rail and metro networks, and regional and low-cost airlines — together with the cargo, parcel and vehicle-deck space that rides alongside the passengers.
 
 **Standalone mode** fits operators without a sophisticated backend — provincial bus lines, ferry and tourism operators, shuttles, charters, small regional airlines: Lulan is the whole system, from search to boarding. **Orchestrated mode** fits enterprises with existing operational platforms: Lulan owns discovery → pricing → cart → payment → confirmed reservation, then a Reservation Sync Connector pushes it into the PSS / manifest system / dispatch backend (planned; today's HMAC-signed webhooks already enable the same integration DIY). Same API and domain model either way — only the connector changes.
 
-### Not just ferries — same engine, one domain per deployment
-
-The primitives are domain-agnostic: **seats** (reserved, fare-classed), **pools** (capacity sold by the count), and **segments** (a claim spans `[from, to)`). A ferry is the many-segment case; a live event is the one-segment case. Nothing in the engine knows the difference.
-
-A concert in an arena maps straight onto them:
-
-| Transit concept | Concert equivalent |
-| --- | --- |
-| Vehicle / vessel | The venue (the arena) |
-| Fare-class seats | Reserved sections — VIP, lower box, upper box |
-| Pool capacity | General admission (an **admission** pool: one bearer QR per unit) |
-| Route stops → segments | Doors → end — a single segment |
-| A departure (trip) | One show night |
-| Signed QR boarding pass | The ticket scanned at the gate |
-
-`lulan-api seed events` seeds exactly that arena show — priced in USD — and the **same eight API calls** from the [ferry quickstart](QUICKSTART.md) sell a VIP seat plus two general-admission tickets and validate them offline at the gate. See [`QUICKSTART-events.md`](QUICKSTART-events.md).
-
-One important boundary: a Lulan deployment serves **one domain**. The active fare ruleset is global (exactly one at a time), so `seed` gives you a *ferry* deployment and `seed events` gives you a *separate concert* deployment in its own database — you never run both in one instance. "Not just ferries" means the same engine and API deploy for either; it does not mean one instance sells both. Pooled admission also distinguishes people from freight: general admission and foot passengers issue one boarding pass per unit, while bulk pools (cargo kilograms, vehicle-deck slots) issue none.
+The primitives underneath carry no transit semantics of their own — **seats**, **pools** sold by the count, and claims that span `[from, to)`. A multi-stop ferry is the many-segment case; a live event is the one-segment case, and the engine cannot tell them apart. That is a reason you will not outgrow Lulan rather than a second market to chase: if you want to see it, [`QUICKSTART-events.md`](QUICKSTART-events.md) sells an arena concert with the same eight API calls. One deployment still serves one domain — the active fare ruleset is global.
 
 ## Contributing
 
@@ -411,6 +396,6 @@ its retaliation clause applies to anyone who sues over it.
 
 ---
 
-**Keywords**: open-source reservation system · headless booking engine · reservation orchestration platform · airline reservation system · bus booking system · ferry reservation software · rail ticketing · seat reservation API · segment inventory · Rust booking engine · offline ticket validation · QR ticketing · WebAssembly pricing
+**Keywords**: open-source reservation system · headless booking engine · self-hosted booking engine · ferry reservation software · ferry booking system · intercity bus ticketing · bus reservation software · shuttle booking API · regional airline reservation system · rail ticketing · seat reservation API · segment inventory · GTFS · reservation orchestration platform · Rust booking engine · offline ticket validation · QR ticketing · WebAssembly pricing
 
-*Lulan aims to be the open-source foundation for capacity reservation worldwide — bringing modern developer tooling to an industry still dominated by legacy software. The name comes from the Filipino word for "to board, to load."
+*Lulan aims to be the open-source foundation for transit reservation — bringing modern developer tooling to an industry still dominated by legacy software. The name comes from the Filipino word for "to board, to load."*

@@ -1,7 +1,7 @@
 {
   "name": "@lulan/storefront-sdk",
   "version": "0.6.0",
-  "description": "Typed TypeScript client for the Lulan reservation engine — trip search, quotes, multi-passenger booking, payments, and signed QR tickets.",
+  "description": "Typed TypeScript client for Lulan, the open-source transit reservation engine — trip search, quotes, multi-passenger booking, payments and signed QR tickets for ferry, bus, shuttle and rail operators.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -12,8 +12,15 @@
     "lulan",
     "reservation",
     "booking",
+    "booking-engine",
     "transit",
+    "ferry",
+    "bus",
+    "shuttle",
+    "rail",
+    "seat-inventory",
     "ticketing",
+    "qr-ticketing",
     "sdk"
   ],
   "type": "module",

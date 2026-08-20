@@ -9,7 +9,7 @@
     "url": "https://github.com/thinkgrid-labs/lulan.git",
     "directory": "packages/validate"
   },
-  "keywords": ["lulan", "ticket", "boarding-pass", "offline", "ed25519", "wasm", "qr"],
+  "keywords": ["lulan", "ticket", "boarding-pass", "offline", "transit", "ferry", "bus", "ed25519", "wasm", "qr", "react-native"],
   "main": "pkg/lulan_validate.js",
   "module": "pkg/lulan_validate.js",
   "types": "types.d.ts",

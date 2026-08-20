@@ -11,6 +11,26 @@ real, not illustrative.
 > `lulan_events` database and never touches the ferry `lulan` one. "The
 > ferry engine" means the same code and API — not the same instance.
 
+## How a concert maps onto transit primitives
+
+The primitives are domain-agnostic: **seats** (reserved, fare-classed),
+**pools** (capacity sold by the count), and **segments** (a claim spans
+`[from, to)`). A ferry is the many-segment case; a live event is the
+one-segment case. Nothing in the engine knows the difference.
+
+| Transit concept | Concert equivalent |
+| --- | --- |
+| Vehicle / vessel | The venue (the arena) |
+| Fare-class seats | Reserved sections — VIP, lower box, upper box |
+| Pool capacity | General admission (an **admission** pool: one bearer QR per unit) |
+| Route stops → segments | Doors → end — a single segment |
+| A departure (trip) | One show night |
+| Signed QR boarding pass | The ticket scanned at the gate |
+
+Pooled admission is also what separates people from freight: general
+admission and ferry foot passengers each issue one boarding pass per unit,
+while bulk pools (cargo kilograms, vehicle-deck slots) issue none.
+
 ## 0. Bring it up
 
 ```bash
