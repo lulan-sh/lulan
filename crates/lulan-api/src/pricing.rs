@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Datelike, Utc};
+use lulan_engine::domain::UnitKind;
 use lulan_engine::inventory::InventoryStore;
 use lulan_pricing::rules::{FareRuleSet, Quote, RuleInput};
 use serde::Deserialize;
@@ -46,8 +47,6 @@ pub struct PricedItem {
     pub unit_code: String,
     pub origin: String,
     pub destination: String,
-    pub from_index: u8,
-    pub to_index: u8,
     pub quantity: i32,
     pub passenger_type: Option<String>,
     pub quote: Quote,
@@ -85,13 +84,48 @@ pub async fn load_rules(pool: &PgPool) -> Result<FareRuleSet, ApiError> {
         "SELECT rules FROM fare_rules WHERE active ORDER BY created_at DESC LIMIT 1",
     )
     .fetch_optional(pool)
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
     let value = row.ok_or(ApiError::ServiceUnavailable(
         "no active fare rules configured",
     ))?;
     serde_json::from_value(value)
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("stored fare rules are malformed: {e}")))
+}
+
+/// Evaluate one line item on whichever engine the server booted with.
+///
+/// The native engine is a bounded in-process computation and runs inline.
+/// An operator WASM module is untrusted code with a large fuel budget, so
+/// it goes to a blocking thread: a module that loops until it traps would
+/// otherwise hold a runtime worker for the whole budget, and tokio cannot
+/// preempt it.
+///
+/// Failures are split by fault. A module that trapped or will not load is
+/// a deployment problem, not a malformed request, and reporting it as 400
+/// hides a server fault in the client-error bucket.
+async fn price_one(
+    state: &AppState,
+    rules: &std::sync::Arc<FareRuleSet>,
+    input: RuleInput,
+    unit_code: &str,
+) -> Result<Quote, ApiError> {
+    let result = if state.pricing.runs_untrusted_code() {
+        let engine = state.pricing.clone();
+        let rules = rules.clone();
+        tokio::task::spawn_blocking(move || engine.price(&rules, &input))
+            .await
+            .map_err(|e| ApiError::Internal(anyhow::anyhow!("pricing task: {e}")))?
+    } else {
+        state.pricing.price(rules, &input)
+    };
+
+    result.map_err(|err| {
+        if err.is_caller_fault() {
+            ApiError::BadRequest(format!("pricing {unit_code}: {err}"))
+        } else {
+            ApiError::Internal(anyhow::anyhow!("pricing {unit_code}: {err}"))
+        }
+    })
 }
 
 /// Price every item of a prospective itinerary against live occupancy.
@@ -107,7 +141,9 @@ pub async fn price_items(
         .as_ref()
         .ok_or(ApiError::ServiceUnavailable("database not configured"))?;
     let store = InventoryStore::new(pool.clone());
-    let rules = load_rules(pool).await?;
+    // Behind an Arc because an untrusted pricing module is evaluated on a
+    // blocking thread, which needs an owned handle to the ruleset.
+    let rules = std::sync::Arc::new(load_rules(pool).await?);
 
     // One departure lookup per distinct trip.
     let mut departures: HashMap<Uuid, DateTime<Utc>> = HashMap::new();
@@ -119,8 +155,7 @@ pub async fn price_items(
             sqlx::query_scalar("SELECT departs_at FROM trips WHERE id = $1")
                 .bind(item.trip_id)
                 .fetch_optional(pool)
-                .await
-                .map_err(|e| ApiError::Internal(e.into()))?;
+                .await?;
         let departs_at = departs_at
             .ok_or_else(|| ApiError::NotFound(format!("trip {} not found", item.trip_id)))?;
         departures.insert(item.trip_id, departs_at);
@@ -155,12 +190,12 @@ pub async fn price_items(
                 ))
             })?;
         let occupancy_bp = store
-            .span_occupancy_bp(item.trip_id, target.unit_id, &target.kind, target.span)
+            .span_occupancy_bp(item.trip_id, target.unit_id, target.kind, target.span)
             .await?;
 
         // Passenger-type discounts apply to seats only; pools are
         // order-level goods.
-        let passenger_type = if target.kind == "seat" {
+        let passenger_type = if target.kind == UnitKind::Seat {
             item.passenger_type.clone()
         } else {
             None
@@ -177,18 +212,13 @@ pub async fn price_items(
             journey_count: context.journey_count,
             is_round_trip: context.is_round_trip,
         };
-        let quote = state
-            .pricing
-            .price(&rules, &input)
-            .map_err(|e| ApiError::BadRequest(format!("pricing {}: {e}", item.unit_code)))?;
+        let quote = price_one(state, &rules, input, &item.unit_code).await?;
 
         priced.push(PricedItem {
             trip_id: item.trip_id,
             unit_code: item.unit_code.clone(),
             origin: item.origin.clone(),
             destination: item.destination.clone(),
-            from_index: target.span.from_index(),
-            to_index: target.span.to_index(),
             quantity,
             passenger_type,
             quote,

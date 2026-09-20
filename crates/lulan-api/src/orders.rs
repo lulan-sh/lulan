@@ -6,7 +6,7 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use chrono::NaiveDate;
-use lulan_engine::domain::{OrderStatus, PassengerType};
+use lulan_engine::domain::{OrderStatus, PassengerType, UnitKind};
 use lulan_engine::events::StoredEvent;
 use lulan_engine::orders::{
     CreateOutcome, ItemValidation, NewOrderAncillary, NewOrderItem, NewPassenger, OrderRecord,
@@ -26,7 +26,7 @@ const MAX_PASSENGERS: usize = 20;
 /// `Serialize` is not for output: it produces the canonical form hashed as
 /// the `Idempotency-Key` request fingerprint, so field order is fixed here
 /// rather than by whatever JSON the client happened to send.
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct CreateOrderRequest {
     #[serde(default)]
     trip_id: Option<Uuid>,
@@ -58,7 +58,7 @@ pub struct CreateOrderRequest {
     ancillaries: Vec<crate::ancillaries::AncillaryLine>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct OrderJourneyRequest {
     trip_id: Uuid,
     items: Vec<OrderItemRequest>,
@@ -67,7 +67,7 @@ pub struct OrderJourneyRequest {
 /// The created order plus its retrieval credential: guests keep the
 /// token (magic-link semantics); customers can also list via
 /// `/v1/customers/me/orders`.
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct CreateOrderResponse {
     #[serde(flatten)]
     record: OrderRecord,
@@ -75,7 +75,7 @@ pub struct CreateOrderResponse {
     customer_id: Option<Uuid>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct PassengerRequest {
     full_name: String,
     #[serde(rename = "type")]
@@ -84,7 +84,7 @@ pub struct PassengerRequest {
     birthdate: Option<NaiveDate>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct OrderItemRequest {
     unit_code: String,
     origin: String,
@@ -144,11 +144,7 @@ pub async fn create(
     // Resolved BEFORE the idempotency key, which is scoped to it — a key
     // means "this caller's request N", never "request N".
     let customer_id = match crate::identity::bearer_subject(&state, &headers) {
-        Some(subject) => Some(
-            crate::identity::upsert_customer(pool, &subject)
-                .await
-                .map_err(|e| ApiError::Internal(e.into()))?,
-        ),
+        Some(subject) => Some(crate::identity::upsert_customer(pool, &subject).await?),
         None => None,
     };
     let guest_contact = req.guest_contact.as_deref().map(str::trim);
@@ -178,7 +174,7 @@ pub async fn create(
                 "passenger full_name is required".into(),
             ));
         }
-        let passenger_type = PassengerType::parse(&p.passenger_type).ok_or_else(|| {
+        let passenger_type = p.passenger_type.parse::<PassengerType>().map_err(|_| {
             ApiError::BadRequest(format!(
                 "unknown passenger type {:?} (adult/child/senior/pwd/infant)",
                 p.passenger_type
@@ -279,7 +275,7 @@ pub async fn create(
                     .ok_or_else(|| {
                         ApiError::NotFound(format!("trip {trip_id} with unit {:?}", item.unit_code))
                     })?;
-                let passenger_type = if target.kind == "seat" {
+                let passenger_type = if target.kind == UnitKind::Seat {
                     seat_passenger_type(item)
                 } else {
                     None
@@ -482,14 +478,14 @@ pub async fn create(
     Ok((StatusCode::CREATED, Json(body)))
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct OrderDetails {
     #[serde(flatten)]
     record: OrderRecord,
     events: Vec<EventSummary>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct GetOrderParams {
     /// Guest retrieval token issued at creation.
     #[serde(default)]
@@ -520,17 +516,14 @@ pub(crate) async fn authorize_order_access(
     let pool = state.db.as_ref().expect("callers check db");
     // Owning customer?
     if let Some(subject) = crate::identity::bearer_subject(state, headers)
-        && let Some(customer_id) = crate::identity::find_customer(pool, &subject)
-            .await
-            .map_err(|e| ApiError::Internal(e.into()))?
+        && let Some(customer_id) = crate::identity::find_customer(pool, &subject).await?
     {
         let owns: Option<Uuid> =
             sqlx::query_scalar("SELECT id FROM orders WHERE id = $1 AND customer_id = $2")
                 .bind(order_id)
                 .bind(customer_id)
                 .fetch_optional(pool)
-                .await
-                .map_err(|e| ApiError::Internal(e.into()))?;
+                .await?;
         if owns.is_some() {
             return Ok(());
         }
@@ -542,12 +535,7 @@ pub(crate) async fn authorize_order_access(
         && let Ok(raw) = value.to_str()
     {
         let key = raw.strip_prefix("Bearer ").unwrap_or(raw);
-        if key.starts_with("llk_")
-            && crate::auth::authenticate(pool, key)
-                .await
-                .map_err(|e| ApiError::Internal(e.into()))?
-                .is_some()
-        {
+        if key.starts_with("llk_") && crate::auth::authenticate(pool, key).await?.is_some() {
             return Ok(());
         }
     }
@@ -556,7 +544,7 @@ pub(crate) async fn authorize_order_access(
     ))
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct EventSummary {
     stream_seq: i32,
     event_type: String,
@@ -577,8 +565,7 @@ pub async fn get(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("order {order_id} not found")))?;
     let events = lulan_engine::events::stream(state.db.as_ref().unwrap(), order_id)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?
+        .await?
         .into_iter()
         .map(|e: StoredEvent| EventSummary {
             stream_seq: e.stream_seq,
@@ -589,7 +576,7 @@ pub async fn get(
     Ok(Json(OrderDetails { record, events }))
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct PaymentResponse {
     order_id: Uuid,
     status: OrderStatus,
@@ -600,8 +587,10 @@ pub struct PaymentResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     client_secret: Option<String>,
     /// Which adapter minted the intent — the storefront needs to know
-    /// whose SDK to load.
-    provider: &'static str,
+    /// whose SDK to load. Owned: an adapter's name can come from its
+    /// configuration, so it is borrowed from the provider rather than
+    /// static.
+    provider: String,
 }
 
 /// POST /v1/orders/{order_id}/payment — Locked → PendingPayment via the
@@ -633,7 +622,7 @@ pub async fn request_payment(
             status,
             payment_intent_id: intent.id,
             client_secret: intent.client_secret,
-            provider: state.payments.name(),
+            provider: state.payments.name().to_string(),
         })),
         TransitionOutcome::NoOp(current) => Err(ApiError::Conflict(format!(
             "payment cannot be requested in state {:?}",
@@ -661,7 +650,7 @@ pub(crate) fn payment_error(err: lulan_engine::payments::PaymentError) -> ApiErr
     }
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct WebhookResponse {
     order_status: Option<OrderStatus>,
     /// False when the delivery was a duplicate, out of order, or simply
@@ -767,7 +756,7 @@ fn signature_header(headers: &HeaderMap) -> Option<String> {
         .map(str::to_string)
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct CancelResponse {
     order_id: Uuid,
     status: OrderStatus,

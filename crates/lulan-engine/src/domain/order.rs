@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::parse::ParseEnumError;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrderStatus {
@@ -21,7 +23,8 @@ pub enum OrderStatus {
 }
 
 impl OrderStatus {
-    pub fn as_str(&self) -> &'static str {
+    /// The stored form, matching the `orders.status` CHECK.
+    pub fn as_str(self) -> &'static str {
         match self {
             OrderStatus::Draft => "draft",
             OrderStatus::Locked => "locked",
@@ -36,8 +39,24 @@ impl OrderStatus {
         }
     }
 
-    pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
+    /// Inventory claims are released when an order leaves these states
+    /// without reaching Paid.
+    pub fn holds_inventory_provisionally(self) -> bool {
+        matches!(self, OrderStatus::Locked | OrderStatus::PendingPayment)
+    }
+}
+
+impl std::fmt::Display for OrderStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for OrderStatus {
+    type Err = ParseEnumError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
             "draft" => OrderStatus::Draft,
             "locked" => OrderStatus::Locked,
             "pending_payment" => OrderStatus::PendingPayment,
@@ -48,14 +67,8 @@ impl OrderStatus {
             "cancelled" => OrderStatus::Cancelled,
             "expired" => OrderStatus::Expired,
             "refunded" => OrderStatus::Refunded,
-            _ => return None,
+            other => return Err(ParseEnumError::new("OrderStatus", other)),
         })
-    }
-
-    /// Inventory claims are released when an order leaves these states
-    /// without reaching Paid.
-    pub fn holds_inventory_provisionally(&self) -> bool {
-        matches!(self, OrderStatus::Locked | OrderStatus::PendingPayment)
     }
 }
 
@@ -76,7 +89,8 @@ pub enum OrderEventType {
 }
 
 impl OrderEventType {
-    pub fn as_str(&self) -> &'static str {
+    /// The stored form, matching the `events.event_type` values.
+    pub fn as_str(self) -> &'static str {
         match self {
             OrderEventType::OrderCreated => "order_created",
             OrderEventType::InventoryLocked => "inventory_locked",
@@ -91,9 +105,19 @@ impl OrderEventType {
             OrderEventType::OrderRefunded => "order_refunded",
         }
     }
+}
 
-    pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
+impl std::fmt::Display for OrderEventType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for OrderEventType {
+    type Err = ParseEnumError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
             "order_created" => OrderEventType::OrderCreated,
             "inventory_locked" => OrderEventType::InventoryLocked,
             "payment_requested" => OrderEventType::PaymentRequested,
@@ -105,7 +129,7 @@ impl OrderEventType {
             "passenger_boarded" => OrderEventType::PassengerBoarded,
             "trip_completed" => OrderEventType::TripCompleted,
             "order_refunded" => OrderEventType::OrderRefunded,
-            _ => return None,
+            other => return Err(ParseEnumError::new("OrderEventType", other)),
         })
     }
 }
@@ -248,7 +272,8 @@ mod tests {
             S::Expired,
             S::Refunded,
         ] {
-            assert_eq!(S::parse(s.as_str()), Some(s));
+            assert_eq!(s.as_str().parse(), Ok(s));
+            assert_eq!(s.to_string(), s.as_str());
         }
         for e in [
             E::OrderCreated,
@@ -263,7 +288,16 @@ mod tests {
             E::TripCompleted,
             E::OrderRefunded,
         ] {
-            assert_eq!(E::parse(e.as_str()), Some(e));
+            assert_eq!(e.as_str().parse(), Ok(e));
+            assert_eq!(e.to_string(), e.as_str());
         }
+    }
+
+    #[test]
+    fn unknown_stored_values_are_refused_with_the_value_named() {
+        let err = "teleported".parse::<S>().unwrap_err();
+        assert_eq!(err.expected, "OrderStatus");
+        assert_eq!(err.value, "teleported");
+        assert!("teleported".parse::<E>().is_err());
     }
 }

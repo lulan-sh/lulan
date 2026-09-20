@@ -12,7 +12,7 @@ use crate::auth::{AdminAuth, audit};
 use crate::error::ApiError;
 use crate::state::AppState;
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct CreateWebhookRequest {
     url: String,
     /// Empty or omitted = subscribe to all event types.
@@ -20,7 +20,7 @@ pub struct CreateWebhookRequest {
     event_types: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct WebhookEndpoint {
     id: Uuid,
     url: String,
@@ -60,16 +60,14 @@ pub async fn create(
     .bind(&secret)
     .bind(&req.event_types)
     .execute(pool)
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
     audit(
         pool,
         admin.0,
         "webhook.created",
         serde_json::json!({ "id": id, "url": req.url, "event_types": req.event_types }),
     )
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
 
     Ok((
         StatusCode::CREATED,
@@ -96,8 +94,7 @@ pub async fn list(
         "SELECT id, url, event_types, active FROM webhook_endpoints ORDER BY created_at",
     )
     .fetch_all(pool)
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
     let endpoints = rows
         .into_iter()
         .map(|row| {
@@ -109,8 +106,7 @@ pub async fn list(
                 secret: None,
             })
         })
-        .collect::<Result<Vec<_>, sqlx::Error>>()
-        .map_err(|e| ApiError::Internal(e.into()))?;
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
     Ok(Json(endpoints))
 }
 
@@ -127,8 +123,7 @@ pub async fn remove(
     let updated = sqlx::query("UPDATE webhook_endpoints SET active = false WHERE id = $1")
         .bind(id)
         .execute(pool)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?
+        .await?
         .rows_affected();
     if updated == 0 {
         return Err(ApiError::NotFound(format!("webhook {id} not found")));
@@ -139,7 +134,6 @@ pub async fn remove(
         "webhook.deactivated",
         serde_json::json!({ "id": id }),
     )
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
     Ok(Json(serde_json::json!({ "deactivated": id })))
 }

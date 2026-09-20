@@ -63,6 +63,16 @@ pub struct HsJwtIdentity {
     key: DecodingKey,
 }
 
+/// Names the issuer but never the key: `DecodingKey` holds the shared
+/// secret, and it is not Debug for that reason.
+impl std::fmt::Debug for HsJwtIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HsJwtIdentity")
+            .field("issuer", &self.issuer)
+            .finish_non_exhaustive()
+    }
+}
+
 impl HsJwtIdentity {
     pub fn new(issuer: impl Into<String>, secret: &[u8]) -> Self {
         Self {
@@ -100,6 +110,7 @@ impl IdentityProvider for HsJwtIdentity {
 /// third party's availability in front of every booking, and a slow IdP
 /// would become a slow checkout. A token whose `kid` is not in the cached
 /// set is rejected; the next refresh picks up newly published keys.
+#[derive(Debug)]
 pub struct JwksIdentity {
     issuer: String,
     audience: Option<String>,
@@ -333,6 +344,7 @@ pub fn verify_retrieval_token(secret: &[u8], order_id: Uuid, token: &str) -> boo
 // ---- Customer endpoints ----------------------------------------------
 
 /// The authenticated customer, as an extractor.
+#[derive(Debug)]
 pub struct CustomerAuth {
     pub customer_id: Uuid,
 }
@@ -350,14 +362,12 @@ impl axum::extract::FromRequestParts<AppState> for CustomerAuth {
             .ok_or(ApiError::ServiceUnavailable("database not configured"))?;
         let subject = bearer_subject(state, &parts.headers)
             .ok_or(ApiError::Unauthorized("customer bearer token required"))?;
-        let customer_id = upsert_customer(pool, &subject)
-            .await
-            .map_err(|e| ApiError::Internal(e.into()))?;
+        let customer_id = upsert_customer(pool, &subject).await?;
         Ok(CustomerAuth { customer_id })
     }
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct CustomerOrder {
     order_id: Uuid,
     trip_ids: Vec<Uuid>,
@@ -384,8 +394,7 @@ pub async fn my_orders(
     )
     .bind(customer.customer_id)
     .fetch_all(pool)
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
     let orders = rows
         .into_iter()
         .map(|row| {
@@ -398,12 +407,11 @@ pub async fn my_orders(
                 created_at: row.try_get("created_at")?,
             })
         })
-        .collect::<Result<Vec<_>, sqlx::Error>>()
-        .map_err(|e| ApiError::Internal(e.into()))?;
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
     Ok(Json(orders))
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct ClaimRequest {
     retrieval_token: String,
 }
@@ -430,8 +438,7 @@ pub async fn claim_order(
     .bind(order_id)
     .bind(customer.customer_id)
     .execute(pool)
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?
+    .await?
     .rows_affected();
     if updated == 0 {
         return Err(ApiError::Conflict(

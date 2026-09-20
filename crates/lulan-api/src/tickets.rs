@@ -20,18 +20,16 @@ pub async fn keys(State(state): State<AppState>) -> Result<Json<KeysResponse>, A
         .db
         .as_ref()
         .ok_or(ApiError::ServiceUnavailable("database not configured"))?;
-    let keys = lulan_engine::ticket::public_keys(pool)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+    let keys = lulan_engine::ticket::public_keys(pool).await?;
     Ok(Json(KeysResponse { keys }))
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct KeysResponse {
     keys: Vec<PublicKeyEntry>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct TicketsResponse {
     order_id: Uuid,
     tickets: Vec<IssuedTicket>,
@@ -84,8 +82,7 @@ pub async fn list(
     crate::orders::authorize_order_access(&state, &headers, order_id, params.token()).await?;
     let tickets = TicketStore::new(pool.clone())
         .tickets_for_order(order_id)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+        .await?;
     Ok(Json(TicketsResponse { order_id, tickets }))
 }
 
@@ -93,7 +90,7 @@ pub async fn list(
 /// a shift and an overnight cache; short enough that the list stays small.
 const REVOCATION_HORIZON_HOURS: i64 = 72;
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct RevocationParams {
     /// Narrow the list to one departure — what a gate device should do.
     /// Scoped answers are complete regardless of when the trip departs;
@@ -102,7 +99,7 @@ pub struct RevocationParams {
     trip_id: Option<Uuid>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct RevocationsResponse {
     /// Ticket ids to refuse despite a valid signature.
     revoked: Vec<Uuid>,
@@ -131,8 +128,7 @@ pub async fn revocations(
         .ok_or(ApiError::ServiceUnavailable("database not configured"))?;
     let revoked = TicketStore::new(pool.clone())
         .revoked_tickets(params.trip_id, REVOCATION_HORIZON_HOURS)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+        .await?;
     Ok(Json(RevocationsResponse {
         revoked,
         as_of: Utc::now(),
@@ -140,13 +136,13 @@ pub async fn revocations(
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct ScanSyncRequest {
     device_id: String,
     scans: Vec<ScanRequest>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct ScanRequest {
     ticket_id: Uuid,
     scanned_at: DateTime<Utc>,
@@ -159,7 +155,7 @@ fn default_result() -> String {
     "ok".into()
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct ScanSyncResponse {
     outcomes: Vec<ScanOutcome>,
 }
@@ -192,8 +188,7 @@ pub async fn sync(
                 scan.scanned_at,
                 &scan.result,
             )
-            .await
-            .map_err(|e| ApiError::Internal(e.into()))?;
+            .await?;
         outcomes.push(outcome);
     }
     Ok(Json(ScanSyncResponse { outcomes }))

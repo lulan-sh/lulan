@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::parse::ParseEnumError;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PassengerType {
@@ -14,7 +16,8 @@ pub enum PassengerType {
 }
 
 impl PassengerType {
-    pub fn as_str(&self) -> &'static str {
+    /// The stored form, matching the `passengers.passenger_type` CHECK.
+    pub fn as_str(self) -> &'static str {
         match self {
             PassengerType::Adult => "adult",
             PassengerType::Child => "child",
@@ -23,15 +26,25 @@ impl PassengerType {
             PassengerType::Infant => "infant",
         }
     }
+}
 
-    pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
+impl std::fmt::Display for PassengerType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for PassengerType {
+    type Err = ParseEnumError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
             "adult" => PassengerType::Adult,
             "child" => PassengerType::Child,
             "senior" => PassengerType::Senior,
             "pwd" => PassengerType::Pwd,
             "infant" => PassengerType::Infant,
-            _ => return None,
+            other => return Err(ParseEnumError::new("PassengerType", other)),
         })
     }
 }

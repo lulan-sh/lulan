@@ -102,8 +102,7 @@ impl FromRequestParts<AppState> for ApiKeyAuth {
         let key = bearer_or_api_key(parts)
             .ok_or(ApiError::Unauthorized("API key required (X-Api-Key)"))?;
         authenticate(pool, &key)
-            .await
-            .map_err(|e| ApiError::Internal(e.into()))?
+            .await?
             .ok_or(ApiError::Unauthorized("unknown or inactive API key"))
     }
 }
@@ -118,6 +117,7 @@ pub struct Actor {
 
 /// Extractor for the operator-admin surface: an `operator_admin` API key
 /// OR an enrolled `admin` staff JWT (Phase 7.5) both work.
+#[derive(Debug)]
 pub struct AdminAuth(pub Actor);
 
 impl FromRequestParts<AppState> for AdminAuth {
@@ -134,8 +134,7 @@ impl FromRequestParts<AppState> for AdminAuth {
                 .as_ref()
                 .ok_or(ApiError::ServiceUnavailable("database not configured"))?;
             let auth = authenticate(pool, &key)
-                .await
-                .map_err(|e| ApiError::Internal(e.into()))?
+                .await?
                 .ok_or(ApiError::Unauthorized("unknown or inactive API key"))?;
             if auth.role != ApiRole::OperatorAdmin {
                 return Err(ApiError::Forbidden("operator_admin role required"));
@@ -167,6 +166,7 @@ impl FromRequestParts<AppState> for AdminAuth {
 /// `operator_admin`. This is the credential a storefront backend, an
 /// agent network, or a payment provider's callback uses — anything that
 /// moves inventory or money without a customer-scoped credential.
+#[derive(Debug)]
 pub struct IntegrationAuth(pub ApiKeyAuth);
 
 impl FromRequestParts<AppState> for IntegrationAuth {
@@ -203,8 +203,7 @@ pub async fn require_integration(
         .filter(|key| key.starts_with("llk_"))
         .ok_or(ApiError::Unauthorized("API key required (X-Api-Key)"))?;
     let auth = authenticate(pool, key)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?
+        .await?
         .ok_or(ApiError::Unauthorized("unknown or inactive API key"))?;
     if !matches!(auth.role, ApiRole::Integration | ApiRole::OperatorAdmin) {
         return Err(ApiError::Forbidden("integration role required"));
@@ -213,6 +212,7 @@ pub async fn require_integration(
 }
 
 /// Extractor for boarding devices: `validator` or `operator_admin`.
+#[derive(Debug)]
 pub struct DeviceAuth(pub ApiKeyAuth);
 
 impl FromRequestParts<AppState> for DeviceAuth {
@@ -266,13 +266,13 @@ pub async fn bootstrap_admin_key(pool: &PgPool, key: &str) -> Result<(), sqlx::E
 
 // ---- Admin endpoints -------------------------------------------------
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct CreateKeyRequest {
     label: String,
     role: String,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct CreatedKey {
     id: Uuid,
     label: String,
@@ -306,16 +306,14 @@ pub async fn create_key(
         .bind(req.label.trim())
         .bind(role.as_str())
         .execute(pool)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+        .await?;
     audit(
         pool,
         admin.0,
         "api_key.created",
         serde_json::json!({ "id": id, "label": req.label.trim(), "role": role.as_str() }),
     )
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
 
     Ok(Json(CreatedKey {
         id,
@@ -338,8 +336,7 @@ pub async fn revoke_key(
     let updated = sqlx::query("UPDATE api_keys SET active = false WHERE id = $1")
         .bind(id)
         .execute(pool)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?
+        .await?
         .rows_affected();
     if updated == 0 {
         return Err(ApiError::NotFound(format!("api key {id} not found")));
@@ -350,7 +347,6 @@ pub async fn revoke_key(
         "api_key.revoked",
         serde_json::json!({ "id": id }),
     )
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
     Ok(Json(serde_json::json!({ "revoked": id })))
 }

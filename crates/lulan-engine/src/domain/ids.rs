@@ -12,7 +12,12 @@ macro_rules! id_type {
         pub struct $name(pub Uuid);
 
         impl $name {
-            #[allow(clippy::new_without_default)]
+            /// Mint a fresh identifier.
+            #[expect(
+                clippy::new_without_default,
+                reason = "each call returns a different id, so a Default impl would \
+                          imply a fixed value this type does not have"
+            )]
             pub fn new() -> Self {
                 Self(Uuid::new_v4())
             }

@@ -69,8 +69,7 @@ pub async fn resolve(state: &AppState, parts: &Parts) -> Result<Option<StaffMemb
     .bind(&subject.issuer)
     .bind(&subject.subject)
     .fetch_optional(pool)
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
     Ok(row.map(|r| StaffMember {
         staff_id: r.get("id"),
         display_name: r.get("display_name"),
@@ -101,12 +100,16 @@ async fn require(
 }
 
 /// Any enrolled staff (admin implies everything).
+#[derive(Debug)]
 pub struct AnyStaff(pub StaffMember);
 /// Network/schedule/fare management.
+#[derive(Debug)]
 pub struct OpsStaff(pub StaffMember);
 /// Order operations: search, refunds, manifests.
+#[derive(Debug)]
 pub struct SupportStaff(pub StaffMember);
 /// Staff/keys/webhooks management.
+#[derive(Debug)]
 pub struct AdminStaff(pub StaffMember);
 
 impl FromRequestParts<AppState> for AnyStaff {

@@ -212,9 +212,32 @@ fn default_timeout() -> u64 {
     20
 }
 
+/// Why a provider description could not be turned into a running adapter.
+///
+/// A concrete enum rather than a `String`, so a caller can tell a typo in
+/// the JSON from a secret that was never exported — and so `?` converts
+/// without laundering the cause through `anyhow::Error::msg`.
+#[derive(Debug, thiserror::Error)]
+pub enum ProviderConfigError {
+    #[error("payment provider description is not valid JSON: {0}")]
+    Malformed(#[from] serde_json::Error),
+    #[error("payment provider {provider}: {key} is not set")]
+    MissingEnv { provider: String, key: String },
+    #[error(
+        "payment provider {provider}: a signature header is configured but no secret_env, \
+         so callbacks could not be authenticated"
+    )]
+    SignatureHeaderWithoutSecret { provider: String },
+    #[error("payment provider {provider}: HTTP client could not be built: {source}")]
+    Client {
+        provider: String,
+        source: reqwest::Error,
+    },
+}
+
 impl ProviderConfig {
-    pub fn from_json(source: &str) -> Result<Self, String> {
-        serde_json::from_str(source).map_err(|e| format!("payment provider config: {e}"))
+    pub fn from_json(source: &str) -> Result<Self, ProviderConfigError> {
+        Ok(serde_json::from_str(source)?)
     }
 }
 
@@ -222,11 +245,9 @@ impl ProviderConfig {
 // Provider
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
 pub struct HttpProvider {
     config: ProviderConfig,
-    /// Leaked so `name()` can hand out `&'static str` like every other
-    /// adapter; there is exactly one provider per process.
-    name: &'static str,
     auth_header: Option<(String, String)>,
     webhook_secret: Option<String>,
     client: reqwest::Client,
@@ -235,10 +256,12 @@ pub struct HttpProvider {
 impl HttpProvider {
     /// Resolve secrets from the environment and build the HTTP client.
     /// Fails loudly at boot rather than at the first sale.
-    pub fn new(config: ProviderConfig) -> Result<Self, String> {
-        let env = |key: &str| -> Result<String, String> {
-            std::env::var(key)
-                .map_err(|_| format!("payment provider {}: {key} is not set", config.name))
+    pub fn new(config: ProviderConfig) -> Result<Self, ProviderConfigError> {
+        let env = |key: &str| -> Result<String, ProviderConfigError> {
+            std::env::var(key).map_err(|_| ProviderConfigError::MissingEnv {
+                provider: config.name.clone(),
+                key: key.to_string(),
+            })
         };
 
         let auth_header = match &config.auth {
@@ -269,19 +292,20 @@ impl HttpProvider {
             None => None,
         };
         if config.webhook.signature_header.is_some() && webhook_secret.is_none() {
-            return Err(format!(
-                "payment provider {}: a signature header is configured but no secret_env",
-                config.name
-            ));
+            return Err(ProviderConfigError::SignatureHeaderWithoutSecret {
+                provider: config.name.clone(),
+            });
         }
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(config.timeout_seconds))
             .build()
-            .map_err(|e| format!("payment provider {}: {e}", config.name))?;
+            .map_err(|source| ProviderConfigError::Client {
+                provider: config.name.clone(),
+                source,
+            })?;
 
         Ok(Self {
-            name: Box::leak(config.name.clone().into_boxed_str()),
             config,
             auth_header,
             webhook_secret,
@@ -335,8 +359,8 @@ impl HttpProvider {
 }
 
 impl PaymentProvider for HttpProvider {
-    fn name(&self) -> &'static str {
-        self.name
+    fn name(&self) -> &str {
+        &self.config.name
     }
 
     fn authenticates_callbacks(&self) -> bool {

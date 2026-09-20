@@ -41,7 +41,7 @@ fn actor(staff_id: Uuid) -> Actor {
 // Ticket signing keys (admin)
 // ====================================================================
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct RotatedKey {
     kid: String,
     public_key: String,
@@ -62,17 +62,14 @@ pub async fn rotate_ticket_key(
     admin: AdminStaffOrKey,
 ) -> Result<(StatusCode, Json<RotatedKey>), ApiError> {
     let pool = db(&state)?;
-    let signer = lulan_engine::ticket::TicketSigner::rotate(pool)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+    let signer = lulan_engine::ticket::TicketSigner::rotate(pool).await?;
     audit(
         pool,
         admin.actor,
         "ticket_key.rotated",
         json!({ "kid": signer.kid }),
     )
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
     Ok((
         StatusCode::CREATED,
         Json(RotatedKey {
@@ -86,7 +83,7 @@ pub async fn rotate_ticket_key(
 // Staff enrolment (admin)
 // ====================================================================
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct EnrollStaffRequest {
     /// Defaults to the configured IdP issuer when omitted.
     #[serde(default)]
@@ -98,7 +95,7 @@ pub struct EnrollStaffRequest {
     role: String,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct StaffRecord {
     id: Uuid,
     issuer: String,
@@ -143,8 +140,7 @@ pub async fn enroll_staff(
     .bind(req.display_name.trim())
     .bind(role.as_str())
     .fetch_one(pool)
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
 
     audit(
         pool,
@@ -152,8 +148,7 @@ pub async fn enroll_staff(
         "staff.enrolled",
         json!({ "id": id, "subject": req.subject.trim(), "role": role.as_str() }),
     )
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
 
     Ok((
         StatusCode::CREATED,
@@ -180,8 +175,7 @@ pub async fn list_staff(
          FROM staff ORDER BY created_at",
     )
     .fetch_all(pool)
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
     Ok(Json(
         rows.into_iter()
             .map(|r| StaffRecord {
@@ -207,15 +201,12 @@ pub async fn revoke_staff(
     let updated = sqlx::query("UPDATE staff SET active = false WHERE id = $1")
         .bind(id)
         .execute(pool)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?
+        .await?
         .rows_affected();
     if updated == 0 {
         return Err(ApiError::NotFound(format!("staff {id} not found")));
     }
-    audit(pool, admin.actor, "staff.revoked", json!({ "id": id }))
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+    audit(pool, admin.actor, "staff.revoked", json!({ "id": id })).await?;
     Ok(Json(json!({ "revoked": id })))
 }
 
@@ -255,8 +246,7 @@ pub async fn list_fare_rules(
          ORDER BY active DESC, created_at DESC LIMIT 20",
     )
     .fetch_all(pool)
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
     let list: Vec<_> = rows
         .iter()
         .map(|r| {
@@ -289,23 +279,16 @@ pub async fn publish_fare_rules(
     }
 
     let id = Uuid::new_v4();
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+    let mut tx = pool.begin().await?;
     sqlx::query("UPDATE fare_rules SET active = false WHERE active")
         .execute(&mut *tx)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+        .await?;
     sqlx::query("INSERT INTO fare_rules (id, active, rules) VALUES ($1, true, $2)")
         .bind(id)
         .bind(&rules)
         .execute(&mut *tx)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
-    tx.commit()
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+        .await?;
+    tx.commit().await?;
 
     audit(
         pool,
@@ -313,8 +296,7 @@ pub async fn publish_fare_rules(
         "fare_rules.published",
         json!({ "id": id }),
     )
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
     Ok((
         StatusCode::CREATED,
         Json(json!({ "id": id, "active": true })),
@@ -328,38 +310,29 @@ pub async fn activate_fare_rules(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let pool = db(&state)?;
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+    let mut tx = pool.begin().await?;
     let exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM fare_rules WHERE id = $1")
         .bind(id)
         .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+        .await?;
     if exists.is_none() {
         return Err(ApiError::NotFound(format!("ruleset {id} not found")));
     }
     sqlx::query("UPDATE fare_rules SET active = false WHERE active")
         .execute(&mut *tx)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+        .await?;
     sqlx::query("UPDATE fare_rules SET active = true WHERE id = $1")
         .bind(id)
         .execute(&mut *tx)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
-    tx.commit()
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+        .await?;
+    tx.commit().await?;
     audit(
         pool,
         actor(ops.0.staff_id),
         "fare_rules.activated",
         json!({ "id": id }),
     )
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
     Ok(Json(json!({ "id": id, "active": true })))
 }
 
@@ -367,7 +340,7 @@ pub async fn activate_fare_rules(
 // Network CRUD (ops): locations, routes, vessels, trips
 // ====================================================================
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct CreateLocationRequest {
     code: String,
     name: String,
@@ -401,12 +374,11 @@ pub async fn create_location(
         "location.created",
         json!({ "id": id, "code": req.code.trim() }),
     )
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
     Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct RouteStopRequest {
     location_code: String,
     #[serde(default)]
@@ -415,7 +387,7 @@ pub struct RouteStopRequest {
     depart_offset_min: i32,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct CreateRouteRequest {
     code: String,
     name: String,
@@ -435,10 +407,7 @@ pub async fn create_route(
             "a route needs at least 2 stops".into(),
         ));
     }
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+    let mut tx = pool.begin().await?;
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO routes (id, code, name) VALUES ($1, $2, $3)")
         .bind(id)
@@ -458,8 +427,7 @@ pub async fn create_route(
         .bind(stop.arrive_offset_min)
         .bind(stop.depart_offset_min)
         .execute(&mut *tx)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?
+        .await?
         .rows_affected();
         if inserted == 0 {
             return Err(ApiError::BadRequest(format!(
@@ -468,27 +436,24 @@ pub async fn create_route(
             )));
         }
     }
-    tx.commit()
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+    tx.commit().await?;
     audit(
         pool,
         actor(ops.0.staff_id),
         "route.created",
         json!({ "id": id, "code": req.code.trim(), "stops": req.stops.len() }),
     )
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
     Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct SeatSpec {
     code: String,
     fare_class: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct PoolSpec {
     code: String,
     capacity: i32,
@@ -500,7 +465,7 @@ pub struct PoolSpec {
     admission: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct CreateVesselRequest {
     code: String,
     name: String,
@@ -528,10 +493,7 @@ pub async fn create_vessel(
             "kind must be bus, ferry, aircraft, or other".into(),
         ));
     }
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+    let mut tx = pool.begin().await?;
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO resources (id, code, name, kind) VALUES ($1, $2, $3, $4)")
         .bind(id)
@@ -551,8 +513,7 @@ pub async fn create_vessel(
         .bind(seat.code.trim())
         .bind(seat.fare_class.trim())
         .execute(&mut *tx)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+        .await?;
     }
     for pool_spec in &req.pools {
         sqlx::query(
@@ -565,24 +526,20 @@ pub async fn create_vessel(
         .bind(pool_spec.capacity)
         .bind(pool_spec.admission)
         .execute(&mut *tx)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+        .await?;
     }
-    tx.commit()
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+    tx.commit().await?;
     audit(
         pool,
         actor(ops.0.staff_id),
         "vessel.created",
         json!({ "id": id, "code": req.code.trim(), "seats": req.seats.len(), "pools": req.pools.len() }),
     )
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
     Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct CreateTripsRequest {
     route_code: String,
     vessel_code: String,
@@ -604,10 +561,7 @@ pub async fn create_trips(
     if req.departures.is_empty() {
         return Err(ApiError::BadRequest("departures is empty".into()));
     }
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+    let mut tx = pool.begin().await?;
     let route: Option<(Uuid, i64)> = sqlx::query_as(
         "SELECT r.id, count(rs.*) - 1 FROM routes r
          JOIN route_stops rs ON rs.route_id = r.id
@@ -615,23 +569,20 @@ pub async fn create_trips(
     )
     .bind(req.route_code.trim())
     .fetch_optional(&mut *tx)
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
     let (route_id, segments) =
         route.ok_or_else(|| ApiError::BadRequest(format!("unknown route {:?}", req.route_code)))?;
     let resource_id: Uuid = sqlx::query_scalar("SELECT id FROM resources WHERE code = $1")
         .bind(req.vessel_code.trim())
         .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?
+        .await?
         .ok_or_else(|| ApiError::BadRequest(format!("unknown vessel {:?}", req.vessel_code)))?;
     let operator_id: Option<Uuid> = match &req.operator_code {
         Some(code) => Some(
             sqlx::query_scalar("SELECT id FROM operators WHERE code = $1")
                 .bind(code.trim())
                 .fetch_optional(&mut *tx)
-                .await
-                .map_err(|e| ApiError::Internal(e.into()))?
+                .await?
                 .ok_or_else(|| ApiError::BadRequest(format!("unknown operator {code:?}")))?,
         ),
         None => None,
@@ -640,8 +591,7 @@ pub async fn create_trips(
         sqlx::query_as("SELECT id, pool_capacity FROM capacity_units WHERE resource_id = $1")
             .bind(resource_id)
             .fetch_all(&mut *tx)
-            .await
-            .map_err(|e| ApiError::Internal(e.into()))?;
+            .await?;
 
     let mut trip_ids = Vec::with_capacity(req.departures.len());
     for departs_at in &req.departures {
@@ -660,8 +610,7 @@ pub async fn create_trips(
         .bind(departs_at)
         .bind(segments as i16)
         .execute(&mut *tx)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?
+        .await?
         .rows_affected();
         if inserted == 0 {
             continue; // already scheduled
@@ -675,8 +624,7 @@ pub async fn create_trips(
                 .bind(unit_id)
                 .execute(&mut *tx)
                 .await
-                .map(|_| ())
-                .map_err(|e| ApiError::Internal(e.into()))?,
+                .map(|_| ())?,
                 Some(capacity) => sqlx::query(
                     "INSERT INTO pool_occupancy (trip_id, unit_id, remaining)
                      VALUES ($1, $2, array_fill($3::int, ARRAY[$4::int]))",
@@ -687,23 +635,19 @@ pub async fn create_trips(
                 .bind(segments as i32)
                 .execute(&mut *tx)
                 .await
-                .map(|_| ())
-                .map_err(|e| ApiError::Internal(e.into()))?,
+                .map(|_| ())?,
             }
         }
         trip_ids.push(trip_id);
     }
-    tx.commit()
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+    tx.commit().await?;
     audit(
         pool,
         actor(ops.0.staff_id),
         "trips.created",
         json!({ "route": req.route_code.trim(), "count": trip_ids.len() }),
     )
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
     Ok((StatusCode::CREATED, Json(json!({ "trip_ids": trip_ids }))))
 }
 
@@ -731,8 +675,7 @@ pub async fn cancel_trip(
         sqlx::query("UPDATE trips SET status = 'cancelled' WHERE id = $1 AND status = 'scheduled'")
             .bind(trip_id)
             .execute(pool)
-            .await
-            .map_err(|e| ApiError::Internal(e.into()))?
+            .await?
             .rows_affected();
     if updated == 0 {
         return Err(ApiError::NotFound(format!(
@@ -750,8 +693,7 @@ pub async fn cancel_trip(
         "trip.cancelled",
         json!({ "trip_id": trip_id, "settled": stats }),
     )
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
     Ok(Json(json!({
         "trip_id": trip_id,
         "orders_cancelled": stats.cancelled,
@@ -765,7 +707,7 @@ pub async fn cancel_trip(
 // Order operations (support): search, refund, manifest
 // ====================================================================
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct OrderSearchParams {
     #[serde(default)]
     contact: Option<String>,
@@ -806,8 +748,7 @@ pub async fn search_orders(
     .bind(&params.name)
     .bind(params.trip_id)
     .fetch_all(pool)
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
     let orders: Vec<_> = rows
         .iter()
         .map(|r| {
@@ -836,8 +777,7 @@ pub async fn refund_order(
     let row = sqlx::query("SELECT payment_intent_id, total_minor FROM orders WHERE id = $1")
         .bind(order_id)
         .fetch_optional(pool)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?
+        .await?
         .ok_or_else(|| ApiError::NotFound(format!("order {order_id} not found")))?;
 
     // Money back first (provider port); only then release inventory.
@@ -862,8 +802,7 @@ pub async fn refund_order(
                 "order.refunded",
                 json!({ "order_id": order_id, "amount_minor": total }),
             )
-            .await
-            .map_err(|e| ApiError::Internal(e.into()))?;
+            .await?;
             Ok(Json(json!({ "order_id": order_id, "status": status })))
         }
         TransitionOutcome::NoOp(current) => Err(ApiError::Conflict(format!(
@@ -902,8 +841,7 @@ pub async fn trip_manifest(
     )
     .bind(trip_id)
     .fetch_all(pool)
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
     let manifest: Vec<_> = rows
         .iter()
         .map(|r| {

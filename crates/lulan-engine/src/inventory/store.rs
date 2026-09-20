@@ -7,7 +7,7 @@ use serde::Serialize;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use crate::domain::{SegmentSpan, SpanError};
+use crate::domain::{ParseEnumError, SegmentSpan, SpanError, UnitKind};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -24,6 +24,10 @@ pub enum StoreError {
     },
     #[error("invalid segment span: {0}")]
     Span(#[from] SpanError),
+    /// `capacity_units.kind` held something this build does not know.
+    /// Only reachable if the CHECK constraint and the code disagree.
+    #[error("stored capacity unit is unusable: {0}")]
+    UnknownUnitKind(#[from] ParseEnumError),
     /// A stored event stream does not replay through the state machine.
     /// Only reachable if the log and the code disagree — surfaced rather
     /// than panicked so one bad stream cannot take the process down.
@@ -137,8 +141,9 @@ pub enum ClaimOutcome {
 #[derive(Debug)]
 pub struct ClaimTarget {
     pub unit_id: Uuid,
-    /// `"seat"` or `"pool"` (matches the capacity_units CHECK constraint).
-    pub kind: String,
+    /// Which occupancy algebra applies, parsed from `capacity_units.kind`
+    /// at this boundary so no downstream site has to match on a string.
+    pub kind: UnitKind,
     /// Set for seats; None for pools.
     pub fare_class: Option<String>,
     pub span: SegmentSpan,
@@ -151,7 +156,7 @@ impl ClaimTarget {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct InventoryStore {
     pool: PgPool,
 }
@@ -215,7 +220,7 @@ impl InventoryStore {
 
         Ok(Some(ClaimTarget {
             unit_id: row.try_get("unit_id")?,
-            kind: row.try_get("kind")?,
+            kind: row.try_get::<String, _>("kind")?.parse()?,
             fare_class: row.try_get("fare_class")?,
             span,
         }))
@@ -228,10 +233,10 @@ impl InventoryStore {
         &self,
         trip_id: Uuid,
         unit_id: Uuid,
-        kind: &str,
+        kind: UnitKind,
         span: SegmentSpan,
     ) -> Result<i64, StoreError> {
-        if kind == "seat" {
+        if kind == UnitKind::Seat {
             let row = sqlx::query(
                 r#"
                 SELECT count(*) FILTER (WHERE (so.occupied_mask & $3) <> 0) AS sold,

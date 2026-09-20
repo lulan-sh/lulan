@@ -115,7 +115,7 @@ pub enum TicketError {
 }
 
 /// A loaded signing key.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct TicketSigner {
     pub kid: String,
     key: SigningKey,
@@ -353,7 +353,7 @@ pub struct ScanOutcome {
     pub order_status: Option<String>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct TicketStore {
     pool: PgPool,
 }
@@ -380,7 +380,9 @@ impl TicketStore {
         else {
             return Err(TicketError::OrderNotFound);
         };
-        let status = OrderStatus::parse(order.get::<String, _>("status").as_str())
+        let status = order
+            .get::<String, _>("status")
+            .parse::<OrderStatus>()
             .expect("orders.status CHECK guarantees a known value");
 
         if status == OrderStatus::Ticketed || status == OrderStatus::Boarded {
@@ -736,16 +738,14 @@ impl TicketStore {
         .await?;
         let mut order_status = None;
         if unboarded == 0 {
-            let current = OrderStatus::parse(
-                sqlx::query_scalar::<_, String>(
-                    "SELECT status FROM orders WHERE id = $1 FOR UPDATE",
-                )
-                .bind(order_id)
-                .fetch_one(&mut *tx)
-                .await?
-                .as_str(),
+            let current = sqlx::query_scalar::<_, String>(
+                "SELECT status FROM orders WHERE id = $1 FOR UPDATE",
             )
-            .expect("known status");
+            .bind(order_id)
+            .fetch_one(&mut *tx)
+            .await?
+            .parse::<OrderStatus>()
+            .expect("orders.status CHECK guarantees a known value");
             if let Ok(next) = apply(Some(current), OrderEventType::PassengerBoarded) {
                 sqlx::query("UPDATE orders SET status = $2, updated_at = now() WHERE id = $1")
                     .bind(order_id)

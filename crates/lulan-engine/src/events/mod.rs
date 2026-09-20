@@ -91,7 +91,7 @@ pub trait EventSink: Send + Sync + 'static {
 }
 
 /// Logs each event — the dev/default sink.
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct TracingSink;
 
 impl EventSink for TracingSink {

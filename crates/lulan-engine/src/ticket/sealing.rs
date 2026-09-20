@@ -76,6 +76,14 @@ pub struct KeyWrapper {
     cipher: XChaCha20Poly1305,
 }
 
+/// Deliberately opaque: this type exists to hold key material, and a
+/// Debug that printed it would undo the point of sealing.
+impl std::fmt::Debug for KeyWrapper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeyWrapper").finish_non_exhaustive()
+    }
+}
+
 impl KeyWrapper {
     /// `Ok(None)` when no wrapping key is configured: seeds are then
     /// stored in the clear, which is the pre-existing behaviour and stays

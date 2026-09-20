@@ -28,8 +28,6 @@ use crate::error::ApiError;
 use crate::state::AppState;
 
 const WINDOW_SECS: u64 = 60;
-const DEFAULT_WRITE_LIMIT: u64 = 300;
-const DEFAULT_READ_LIMIT: u64 = 1_200;
 
 /// Atomic sliding window: drop old entries, count, conditionally add.
 /// KEYS[1] = zset key; ARGV = now_ms, window_ms, limit, member.
@@ -44,28 +42,15 @@ redis.call('PEXPIRE', KEYS[1], ARGV[2])
 return 1
 "#;
 
-fn env_u64(key: &str, default: u64) -> u64 {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
-
-/// How many reverse proxies sit in front of this process.
-///
-/// Zero — the default — means `X-Forwarded-For` is ignored entirely and
-/// the peer address is used. Behind one proxy (Caddy, nginx, an ALB) set
-/// 1, and the last-but-zero entry is taken. Counting from the RIGHT is
-/// what makes this safe: a client can prepend anything it likes to the
-/// header, but it cannot forge the entries its own proxy appends.
-fn trusted_proxy_hops() -> usize {
-    std::env::var("LULAN_TRUSTED_PROXY_HOPS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0)
-}
-
 /// The address to attribute this request to.
+///
+/// `hops` is how many reverse proxies sit in front of this process, from
+/// [`RuntimeLimits`](crate::config::RuntimeLimits). Zero — the default —
+/// means `X-Forwarded-For` is ignored entirely and the peer address is
+/// used. Behind one proxy (Caddy, nginx, an ALB) set 1, and the
+/// last-but-zero entry is taken. Counting from the RIGHT is what makes
+/// this safe: a client can prepend anything it likes to the header, but
+/// it cannot forge the entries its own proxy appends.
 fn client_ip(req: &Request, hops: usize) -> Option<IpAddr> {
     let peer = req
         .extensions()
@@ -100,11 +85,12 @@ fn caller_key(req: &Request, hops: usize) -> String {
         .or_else(|| req.headers().get("authorization"))
         .and_then(|v| v.to_str().ok())
     {
+        // Eight bytes, not four: buckets are per-caller budgets, so a
+        // digest collision means one caller spending another's. 32 bits
+        // collides at ~77k active keys.
         let digest = Sha256::digest(key.as_bytes());
-        return format!(
-            "key:{:02x}{:02x}{:02x}{:02x}",
-            digest[0], digest[1], digest[2], digest[3]
-        );
+        let short = u64::from_be_bytes(digest[..8].try_into().expect("sha256 is 32 bytes"));
+        return format!("key:{short:016x}");
     }
     match client_ip(req, hops) {
         Some(ip) => format!("ip:{ip}"),
@@ -126,14 +112,18 @@ pub async fn limit(State(state): State<AppState>, req: Request, next: Next) -> R
         return next.run(req).await;
     };
 
+    let limits = state.limits;
     let read = matches!(*req.method(), Method::GET | Method::HEAD);
     let (bucket, limit) = if read {
-        ("r", env_u64("LULAN_RATE_LIMIT_READS", DEFAULT_READ_LIMIT))
+        ("r", limits.read_per_minute)
     } else {
-        ("w", env_u64("LULAN_RATE_LIMIT", DEFAULT_WRITE_LIMIT))
+        ("w", limits.write_per_minute)
     };
 
-    let key = format!("rl:{bucket}:{{{}}}", caller_key(&req, trusted_proxy_hops()));
+    let key = format!(
+        "rl:{bucket}:{{{}}}",
+        caller_key(&req, limits.trusted_proxy_hops)
+    );
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)

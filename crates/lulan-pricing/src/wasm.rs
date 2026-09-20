@@ -24,6 +24,12 @@ pub struct WasmEngine {
     module: Module,
 }
 
+impl std::fmt::Debug for WasmEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WasmEngine").finish_non_exhaustive()
+    }
+}
+
 struct HostState {
     limits: StoreLimits,
 }
@@ -34,22 +40,22 @@ impl WasmEngine {
         let mut config = Config::new();
         config.consume_fuel(true);
         let engine =
-            Engine::new(&config).map_err(|e| PricingError::Module(format!("engine: {e}")))?;
+            Engine::new(&config).map_err(|e| PricingError::Unusable(format!("engine: {e}")))?;
         let module = Module::new(&engine, bytes)
-            .map_err(|e| PricingError::Module(format!("compile: {e}")))?;
+            .map_err(|e| PricingError::Unusable(format!("compile: {e}")))?;
         Ok(Self { engine, module })
     }
 
     pub fn from_file(path: &std::path::Path) -> Result<Self, PricingError> {
         let bytes = std::fs::read(path)
-            .map_err(|e| PricingError::Module(format!("read {}: {e}", path.display())))?;
+            .map_err(|e| PricingError::Unusable(format!("read {}: {e}", path.display())))?;
         Self::from_bytes(&bytes)
     }
 
     fn call(&self, request: &PriceRequest) -> Result<PriceResponse, PricingError> {
         let module_err = |what: &str| {
             let what = what.to_string();
-            move |e: wasmtime::Error| PricingError::Module(format!("{what}: {e}"))
+            move |e: wasmtime::Error| PricingError::Unusable(format!("{what}: {e}"))
         };
 
         let mut store = Store::new(
@@ -71,7 +77,7 @@ impl WasmEngine {
             .map_err(module_err("instantiate (module must not import anything)"))?;
         let memory = instance
             .get_memory(&mut store, "memory")
-            .ok_or_else(|| PricingError::Module("module must export `memory`".into()))?;
+            .ok_or_else(|| PricingError::Unusable("module must export `memory`".into()))?;
         let alloc = instance
             .get_typed_func::<i32, i32>(&mut store, "alloc")
             .map_err(module_err("export `alloc`"))?;
@@ -80,26 +86,28 @@ impl WasmEngine {
             .map_err(module_err("export `price`"))?;
 
         let request_bytes = serde_json::to_vec(request)
-            .map_err(|e| PricingError::Module(format!("encode request: {e}")))?;
+            .map_err(|e| PricingError::Unusable(format!("encode request: {e}")))?;
         let ptr = alloc
             .call(&mut store, request_bytes.len() as i32)
-            .map_err(module_err("alloc call"))?;
+            .map_err(|e| PricingError::Trapped(format!("alloc call: {e}")))?;
         memory
             .write(&mut store, ptr as usize, &request_bytes)
-            .map_err(|e| PricingError::Module(format!("write request: {e}")))?;
+            .map_err(|e| PricingError::Unusable(format!("write request: {e}")))?;
 
+        // The one call that runs guest code to completion: a trap or an
+        // exhausted fuel budget both land here.
         let packed = price
             .call(&mut store, (ptr, request_bytes.len() as i32))
-            .map_err(module_err("price call (trap/out of fuel)"))?;
+            .map_err(|e| PricingError::Trapped(format!("price call (trap/out of fuel): {e}")))?;
         let response_ptr = ((packed as u64) >> 32) as usize;
         let response_len = ((packed as u64) & 0xFFFF_FFFF) as usize;
 
         let data = memory.data(&store);
         let response_bytes = data
             .get(response_ptr..response_ptr + response_len)
-            .ok_or_else(|| PricingError::Module("response out of bounds".into()))?;
+            .ok_or_else(|| PricingError::Unusable("response out of bounds".into()))?;
         serde_json::from_slice(response_bytes)
-            .map_err(|e| PricingError::Module(format!("decode response: {e}")))
+            .map_err(|e| PricingError::Unusable(format!("decode response: {e}")))
     }
 }
 
@@ -111,8 +119,13 @@ impl PricingEngine for WasmEngine {
         })?;
         match (response.ok, response.err) {
             (Some(quote), _) => Ok(quote),
-            (None, Some(err)) => Err(PricingError::Module(err)),
-            (None, None) => Err(PricingError::Module("empty response".into())),
+            // The module ran fine and said no — that is about the input.
+            (None, Some(err)) => Err(PricingError::Rejected(err)),
+            (None, None) => Err(PricingError::Unusable("empty response".into())),
         }
+    }
+
+    fn runs_untrusted_code(&self) -> bool {
+        true
     }
 }

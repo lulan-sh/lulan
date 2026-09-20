@@ -67,6 +67,9 @@ fn percentile(sorted: &[u128], p: f64) -> u128 {
     sorted[idx]
 }
 
+/// PRD seat-lock latency target. Asserted in paced mode, not just printed.
+const PRD_SEAT_LOCK_P95_MS: f64 = 20.0;
+
 const CODES: [&str; 4] = ["BTG", "CTC", "ILO", "CEB"];
 const SPANS: [(u8, u8); 6] = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
 
@@ -359,25 +362,52 @@ async fn main() -> anyhow::Result<ExitCode> {
         percentile(&claim_lat, 95.0),
         percentile(&claim_lat, 99.0)
     );
+    // ---- Gate ------------------------------------------------------------
+    // Every measured thing that matters fails the run, because a harness
+    // that only reports is not a harness. In particular `claimed > 0` and
+    // `errors == 0`: "zero double-sells" is trivially true of a run where
+    // nothing sold, so a server 500ing on every claim used to exit 0 with
+    // a clean bill of health.
+    let mut failures: Vec<String> = Vec::new();
+    if overlap_violations > 0 {
+        failures.push(format!("{overlap_violations} overlapping winning claims"));
+    }
+    if db_violations > 0 {
+        failures.push(format!(
+            "{db_violations} db masks disagree with the winners"
+        ));
+    }
+    if errors > 0 {
+        failures.push(format!("{errors} transport/5xx errors"));
+    }
+    if claimed == 0 {
+        failures.push("nothing was claimed — the run proves nothing".to_string());
+    }
     if mode == "paced" {
         let p95_ms = percentile(&claim_lat, 95.0) as f64 / 1000.0;
+        let pass = p95_ms < PRD_SEAT_LOCK_P95_MS;
         println!(
-            "PRD seat-lock target <20 ms: p95 = {:.2} ms → {}",
-            p95_ms,
-            if p95_ms < 20.0 { "PASS" } else { "MISS" }
+            "PRD seat-lock target <{PRD_SEAT_LOCK_P95_MS} ms: p95 = {p95_ms:.2} ms → {}",
+            if pass { "PASS" } else { "MISS" }
         );
+        if !pass {
+            failures.push(format!(
+                "p95 claim latency {p95_ms:.2} ms exceeds the {PRD_SEAT_LOCK_P95_MS} ms target"
+            ));
+        }
     }
 
-    if overlap_violations == 0 && db_violations == 0 {
+    if failures.is_empty() {
         println!(
-            "\nINVARIANT OK: zero double-sells across {} attempts",
+            "\nINVARIANT OK: zero double-sells across {} attempts ({claimed} claimed)",
             outcomes.len()
         );
         Ok(ExitCode::SUCCESS)
     } else {
-        eprintln!(
-            "\nINVARIANT VIOLATED: {overlap_violations} overlaps, {db_violations} db mismatches"
-        );
+        eprintln!("\nRUN FAILED:");
+        for failure in &failures {
+            eprintln!("  - {failure}");
+        }
         Ok(ExitCode::FAILURE)
     }
 }

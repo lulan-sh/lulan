@@ -72,17 +72,15 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<Ancillary>>,
          FROM ancillaries WHERE active ORDER BY kind, code",
     )
     .fetch_all(pool)
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
     let catalog = rows
         .iter()
         .map(row_to_ancillary)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| ApiError::Internal(e.into()))?;
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Json(catalog))
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct CreateAncillaryRequest {
     code: String,
     name: String,
@@ -159,8 +157,7 @@ pub async fn create(
         "ancillary.created",
         serde_json::json!({ "id": id, "code": req.code.trim(), "price_minor": req.price_minor }),
     )
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
 
     Ok((
         StatusCode::CREATED,
@@ -191,8 +188,7 @@ pub async fn remove(
     let updated = sqlx::query("UPDATE ancillaries SET active = false WHERE id = $1")
         .bind(id)
         .execute(pool)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?
+        .await?
         .rows_affected();
     if updated == 0 {
         return Err(ApiError::NotFound(format!("ancillary {id} not found")));
@@ -203,8 +199,7 @@ pub async fn remove(
         "ancillary.deactivated",
         serde_json::json!({ "id": id }),
     )
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
     Ok(Json(serde_json::json!({ "deactivated": id })))
 }
 
@@ -247,9 +242,7 @@ pub async fn price_lines(
     if lines.is_empty() {
         return Ok(Vec::new());
     }
-    let catalog = active_catalog(pool)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+    let catalog = active_catalog(pool).await?;
 
     let mut priced = Vec::with_capacity(lines.len());
     for line in lines {

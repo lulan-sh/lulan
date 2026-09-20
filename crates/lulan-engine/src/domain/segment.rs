@@ -21,6 +21,30 @@ pub enum SpanError {
 }
 
 /// A half-open range of segment indices `[from, to)` within a single trip.
+///
+/// # Examples
+///
+/// Availability across a whole journey is one AND against the unit's
+/// occupancy mask — this is the algebra the SQL side mirrors.
+///
+/// ```
+/// use lulan_engine::domain::SegmentSpan;
+///
+/// // Stops A─B─C─D: segments 0, 1, 2.
+/// let a_to_b = SegmentSpan::new(0, 1)?;
+/// let c_to_d = SegmentSpan::new(2, 3)?;
+/// let b_to_c = SegmentSpan::new(1, 2)?;
+///
+/// // A seat sold A→B and C→D is still free for the middle leg.
+/// let occupied = a_to_b.mask() | c_to_d.mask();
+/// assert!(b_to_c.is_available(occupied));
+/// // ...but not for a journey that overlaps either sold leg.
+/// assert!(!SegmentSpan::new(0, 2)?.is_available(occupied));
+///
+/// // Adjacent spans touch but never overlap: [0,2) and [2,4) are disjoint.
+/// assert!(!SegmentSpan::new(0, 2)?.overlaps(&SegmentSpan::new(2, 4)?));
+/// # Ok::<(), lulan_engine::domain::SpanError>(())
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SegmentSpan {
     from: u8,

@@ -7,6 +7,10 @@
 //! - `orders` — order lifecycle state machine (Phase 3)
 //! - `ticket` — ticket issuance and signing (Phase 5)
 
+// Every public type is inspectable: a request or response you cannot
+// put in a `tracing` field is one you cannot diagnose in production.
+#![warn(missing_debug_implementations)]
+
 pub mod domain;
 pub mod events;
 pub mod inventory;

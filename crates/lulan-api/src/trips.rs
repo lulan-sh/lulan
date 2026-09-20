@@ -19,7 +19,7 @@ fn default_trip_type() -> TripType {
     TripType::OneWay
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct SearchParams {
     origin: String,
     destination: String,
@@ -40,7 +40,7 @@ const DEFAULT_SEARCH_LIMIT: i64 = 50;
 const MAX_SEARCH_LIMIT: i64 = 200;
 
 /// One leg of the search: a direction + date and its candidate trips.
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct SearchLeg {
     /// `outbound` or `return`.
     leg: &'static str,
@@ -50,7 +50,7 @@ pub struct SearchLeg {
     trips: Vec<TripSummary>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct SearchResponse {
     trip_type: TripType,
     legs: Vec<SearchLeg>,
@@ -122,7 +122,7 @@ pub async fn search(
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct AvailabilityParams {
     origin: String,
     destination: String,

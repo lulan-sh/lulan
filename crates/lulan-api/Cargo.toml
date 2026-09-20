@@ -25,6 +25,7 @@ opentelemetry-otlp = { workspace = true, optional = true }
 tracing-opentelemetry = { workspace = true, optional = true }
 metrics-exporter-prometheus = { workspace = true }
 sha2 = { workspace = true }
+rand = { workspace = true }
 redis = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }

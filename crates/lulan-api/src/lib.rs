@@ -1,29 +1,41 @@
 //! Lulan API: HTTP layer over the engine. Library crate so integration
 //! tests (and later the loadgen harness) can drive the router directly.
+//!
+//! The public surface is deliberately small: [`router`], [`AppState`],
+//! [`MIGRATOR`], and the few modules `main` and the integration tests
+//! genuinely drive (`auth`, `config`, `gtfs`, `identity`, `seed`, `staff`,
+//! `state`, `telemetry`). Everything else — handlers, middleware, the
+//! error type — is `pub(crate)`: it was only ever public because the
+//! modules were declared in one block, and every `pub` is a compatibility
+//! commitment.
 
-pub mod admin;
-pub mod ancillaries;
+// Every public type is inspectable: a request or response you cannot
+// put in a `tracing` field is one you cannot diagnose in production.
+#![warn(missing_debug_implementations)]
+
+pub(crate) mod admin;
+pub(crate) mod ancillaries;
 pub mod auth;
 pub mod config;
-pub mod cors;
-pub mod error;
+pub(crate) mod cors;
+pub(crate) mod error;
 pub mod gtfs;
-pub mod health;
-pub mod idempotency;
+pub(crate) mod health;
+pub(crate) mod idempotency;
 pub mod identity;
-pub mod metrics;
-pub mod orders;
-pub mod pricing;
-pub mod quotes;
-pub mod rate_limit;
-pub mod reservations;
+pub(crate) mod metrics;
+pub(crate) mod orders;
+pub(crate) mod pricing;
+pub(crate) mod quotes;
+pub(crate) mod rate_limit;
+pub(crate) mod reservations;
 pub mod seed;
 pub mod staff;
 pub mod state;
 pub mod telemetry;
-pub mod tickets;
-pub mod trips;
-pub mod webhooks_admin;
+pub(crate) mod tickets;
+pub(crate) mod trips;
+pub(crate) mod webhooks_admin;
 
 use axum::{
     Router,
@@ -61,6 +73,9 @@ const DOCS_HTML: &str = r#"<!doctype html>
 "#;
 
 pub fn router(state: AppState) -> Router {
+    // Generous by default — a large itinerary prices several legs — but
+    // bounded, and read once rather than per request.
+    let request_timeout_secs = state.request_timeout_secs;
     let router = Router::new()
         .route("/health/live", get(health::live))
         .route("/health/ready", get(health::ready))
@@ -178,20 +193,10 @@ pub fn router(state: AppState) -> Router {
     router
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
-            std::time::Duration::from_secs(request_timeout_secs()),
+            std::time::Duration::from_secs(request_timeout_secs),
         ))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
-}
-
-/// `LULAN_REQUEST_TIMEOUT_SECS`. Generous by default — a large itinerary
-/// prices several legs — but bounded.
-fn request_timeout_secs() -> u64 {
-    std::env::var("LULAN_REQUEST_TIMEOUT_SECS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .filter(|secs| *secs > 0)
-        .unwrap_or(30)
 }
 
 #[cfg(test)]

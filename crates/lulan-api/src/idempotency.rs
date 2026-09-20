@@ -104,13 +104,10 @@ pub async fn replay_if_completed(
     .bind(scope)
     .bind(key)
     .fetch_optional(pool)
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
 
     let Some(row) = row else { return Ok(None) };
-    let stored_hash: Vec<u8> = row
-        .try_get("request_hash")
-        .map_err(|e| ApiError::Internal(e.into()))?;
+    let stored_hash: Vec<u8> = row.try_get("request_hash")?;
     if stored_hash != request_hash {
         return Err(reuse_conflict());
     }
@@ -138,8 +135,7 @@ pub async fn reserve(
     .bind(&key)
     .bind(request_hash)
     .execute(pool)
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?
+    .await?
     .rows_affected();
     if claimed == 1 {
         return Ok(Reserved::Held(Reservation { scope, key }));
@@ -153,22 +149,17 @@ pub async fn reserve(
     .bind(&scope)
     .bind(&key)
     .fetch_optional(pool)
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
     // Swept between the insert and the read — treat as a fresh attempt.
     let Some(row) = row else {
         return Ok(Reserved::Held(Reservation { scope, key }));
     };
 
-    let stored_hash: Vec<u8> = row
-        .try_get("request_hash")
-        .map_err(|e| ApiError::Internal(e.into()))?;
+    let stored_hash: Vec<u8> = row.try_get("request_hash")?;
     if stored_hash != request_hash {
         return Err(reuse_conflict());
     }
-    let status: String = row
-        .try_get("status")
-        .map_err(|e| ApiError::Internal(e.into()))?;
+    let status: String = row.try_get("status")?;
     if status == "completed" {
         let (code, body) = stored_response(&row)?;
         return Ok(Reserved::Replay(code, body));
@@ -199,8 +190,7 @@ pub async fn complete(
     .bind(status.as_u16() as i32)
     .bind(body)
     .execute(pool)
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
+    .await?;
     Ok(())
 }
 
@@ -231,12 +221,8 @@ fn reuse_conflict() -> ApiError {
 fn stored_response(
     row: &sqlx::postgres::PgRow,
 ) -> Result<(StatusCode, serde_json::Value), ApiError> {
-    let code: Option<i32> = row
-        .try_get("status_code")
-        .map_err(|e| ApiError::Internal(e.into()))?;
-    let body: Option<serde_json::Value> = row
-        .try_get("response")
-        .map_err(|e| ApiError::Internal(e.into()))?;
+    let code: Option<i32> = row.try_get("status_code")?;
+    let body: Option<serde_json::Value> = row.try_get("response")?;
     match (code, body) {
         (Some(code), Some(body)) => Ok((
             StatusCode::from_u16(code as u16).unwrap_or(StatusCode::OK),

@@ -3,13 +3,13 @@ use serde::Serialize;
 
 use crate::state::AppState;
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct Health {
     status: &'static str,
     checks: Checks,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct Checks {
     database: &'static str,
     redis: &'static str,

@@ -84,7 +84,12 @@ pub enum PaymentEvent {
 
 pub trait PaymentProvider: Send + Sync + 'static {
     /// Short identifier for logs and operator-facing output.
-    fn name(&self) -> &'static str;
+    ///
+    /// Borrowed from the provider, not `&'static`: an adapter whose name
+    /// comes from configuration would otherwise have to leak it to satisfy
+    /// the signature, which is a leak per constructed provider, not per
+    /// process. Built-in adapters return a literal, which still coerces.
+    fn name(&self) -> &str;
 
     /// Whether the provider authenticates its own callbacks by signing
     /// them. When false, the webhook endpoint must demand an API key
@@ -133,7 +138,7 @@ struct FakeCallback {
 }
 
 impl PaymentProvider for FakeProvider {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "fake"
     }
 

@@ -73,6 +73,7 @@ fn otlp_layer(
 /// Flushes buffered spans on shutdown. Without this a crash-free exit
 /// still loses whatever was in the batch queue — which is precisely the
 /// tail you were tracing to find.
+#[derive(Debug)]
 pub struct Guard {
     #[cfg(feature = "otlp")]
     provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,

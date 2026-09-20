@@ -8,6 +8,7 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
+use lulan_engine::domain::UnitKind;
 use lulan_engine::inventory::ClaimOutcome;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -68,14 +69,14 @@ fn trip_hold_fraction() -> f64 {
 
 /// One seat to hold. Holds cover seats only; pools are claimed at order
 /// time.
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct HoldItem {
     unit_code: String,
     origin: String,
     destination: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct HoldJourney {
     trip_id: Uuid,
     items: Vec<HoldItem>,
@@ -84,7 +85,7 @@ pub struct HoldJourney {
 /// Itinerary shape (`journeys`) or the single-trip shape (`trip_id` +
 /// `items`) — the same shapes as quotes and orders. A one-way holds one
 /// journey; a round trip holds two. One call, one hold id.
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct HoldRequest {
     #[serde(default)]
     trip_id: Option<Uuid>,
@@ -96,7 +97,7 @@ pub struct HoldRequest {
     ttl_seconds: Option<u64>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct HeldItemInfo {
     trip_id: Uuid,
     unit_code: String,
@@ -104,7 +105,7 @@ pub struct HeldItemInfo {
     destination: String,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct HoldResponse {
     /// One id for the whole itinerary hold — present it at order time (or
     /// to DELETE /v1/holds/{id}) to release every seat together.
@@ -172,7 +173,7 @@ pub async fn create_hold(
                     item.unit_code
                 ))
             })?;
-        if target.kind != "seat" {
+        if target.kind != UnitKind::Seat {
             return Err(ApiError::BadRequest(
                 "holds are only supported for seats; pools are claimed at order time".into(),
             ));
@@ -237,15 +238,9 @@ pub async fn create_hold(
             .unwrap_or_else(default_hold_ttl)
             .clamp(MIN_HOLD_TTL_SECS, max_hold_ttl()),
     );
-    let hold = holds
-        .acquire_itinerary(&seats, ttl)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?
-        .ok_or_else(|| {
-            ApiError::Conflict(
-                "a seat in this itinerary is currently held by another session".into(),
-            )
-        })?;
+    let hold = holds.acquire_itinerary(&seats, ttl).await?.ok_or_else(|| {
+        ApiError::Conflict("a seat in this itinerary is currently held by another session".into())
+    })?;
 
     Ok((
         StatusCode::CREATED,
@@ -263,10 +258,7 @@ pub async fn release_hold(
     Path(hold_id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let holds = state.holds()?;
-    let released = holds
-        .release_itinerary(hold_id)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+    let released = holds.release_itinerary(hold_id).await?;
     if released {
         Ok(StatusCode::NO_CONTENT)
     } else {
@@ -274,7 +266,7 @@ pub async fn release_hold(
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct ClaimRequest {
     unit_code: String,
     origin: String,
@@ -286,7 +278,7 @@ pub struct ClaimRequest {
     hold_id: Option<Uuid>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct ClaimResponse {
     status: &'static str,
     trip_id: Uuid,
@@ -345,13 +337,13 @@ pub async fn create_claim(
         }
     }
 
-    let outcome = match target.kind.as_str() {
-        "seat" => {
+    let outcome = match target.kind {
+        UnitKind::Seat => {
             store
                 .claim_seat(trip_id, target.unit_id, target.span)
                 .await?
         }
-        "pool" => {
+        UnitKind::Pool => {
             let qty = req.quantity.unwrap_or(1);
             if qty <= 0 {
                 return Err(ApiError::BadRequest("quantity must be positive".into()));
@@ -359,11 +351,6 @@ pub async fn create_claim(
             store
                 .claim_pool(trip_id, target.unit_id, target.span, qty)
                 .await?
-        }
-        other => {
-            return Err(ApiError::Internal(anyhow::anyhow!(
-                "unknown capacity unit kind {other:?}"
-            )));
         }
     };
 

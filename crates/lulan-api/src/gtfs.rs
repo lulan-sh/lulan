@@ -27,6 +27,7 @@ use serde::Deserialize;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+#[derive(Debug)]
 pub struct GtfsOptions {
     /// Expand dated trips for this many days starting today.
     pub days: i64,

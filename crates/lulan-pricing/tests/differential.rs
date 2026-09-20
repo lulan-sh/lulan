@@ -63,7 +63,14 @@ fn outcome(
 ) -> Result<lulan_pricing::rules::Quote, String> {
     engine.price(rules, input).map_err(|e| match e {
         PricingError::Eval(err) => err.to_string(),
-        PricingError::Module(err) => err,
+        // A module that rejected the input is the WASM-side equivalent of
+        // Eval: both engines must refuse the same inputs for the same
+        // reason, which is what this comparison is checking.
+        PricingError::Rejected(err) => err,
+        // A trapped or unloadable module is not a pricing outcome at all.
+        other @ (PricingError::Unusable(_) | PricingError::Trapped(_)) => {
+            panic!("module failed rather than priced: {other}")
+        }
     })
 }
 
@@ -212,8 +219,8 @@ proptest! {
 #[test]
 fn garbage_module_bytes_fail_cleanly() {
     match WasmEngine::from_bytes(b"not a wasm module") {
-        Err(PricingError::Module(_)) => {}
-        Err(other) => panic!("expected Module error, got {other}"),
+        Err(PricingError::Unusable(_)) => {}
+        Err(other) => panic!("expected Unusable, got {other}"),
         Ok(_) => panic!("garbage bytes must not compile"),
     }
 }

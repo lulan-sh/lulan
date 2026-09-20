@@ -77,7 +77,7 @@ return 1
 const INDEX_TTL_MULTIPLIER: u32 = 4;
 
 #[derive(Debug, thiserror::Error)]
-#[error("hold store error: {0}")]
+#[error(transparent)]
 pub struct HoldError(#[from] redis::RedisError);
 
 #[derive(Debug, Clone, Copy)]
@@ -102,10 +102,86 @@ pub struct ItineraryHold {
     pub members: Vec<HeldSeat>,
 }
 
+// Debug is hand-written below: ConnectionManager is not Debug.
 #[derive(Clone)]
 pub struct HoldStore {
     conn: ConnectionManager,
     acquire: Script,
+}
+
+impl std::fmt::Debug for HoldStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HoldStore").finish_non_exhaustive()
+    }
+}
+
+/// Releases whatever an in-progress [`HoldStore::acquire_itinerary`] has
+/// taken so far — including when the future is dropped rather than run to
+/// completion.
+///
+/// An itinerary is acquired seat by seat, so between the first `acquire`
+/// and the group registry write there is a window where some seats are
+/// held and no id yet refers to them. Unwinding that window by hand covers
+/// only the paths the code can see. A client disconnect or the request
+/// timeout drops the future at an `.await`, the hand-written rollback
+/// never runs, and those seats stay held until their TTL with nobody able
+/// to release them early. `Drop` runs on that path too.
+struct ItineraryRollback {
+    store: HoldStore,
+    seat_hold_ids: Vec<Uuid>,
+    armed: bool,
+}
+
+impl ItineraryRollback {
+    fn new(store: HoldStore) -> Self {
+        Self {
+            store,
+            seat_hold_ids: Vec::new(),
+            armed: true,
+        }
+    }
+
+    fn record(&mut self, seat_hold_id: Uuid) {
+        self.seat_hold_ids.push(seat_hold_id);
+    }
+
+    /// The group registry exists and owns these seats now; releasing them
+    /// is the caller's business from here.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ItineraryRollback {
+    fn drop(&mut self) {
+        if !self.armed || self.seat_hold_ids.is_empty() {
+            return;
+        }
+        let store = self.store.clone();
+        let ids = std::mem::take(&mut self.seat_hold_ids);
+        // Drop cannot await, so the releases go to the runtime. With no
+        // runtime to hand them to, the TTL still expires them — the
+        // pre-existing worst case, not a new one.
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    for id in ids {
+                        if let Err(err) = store.release(id).await {
+                            tracing::warn!(
+                                error = %err,
+                                hold_id = %id,
+                                "releasing a partial itinerary hold failed; it expires on TTL"
+                            );
+                        }
+                    }
+                });
+            }
+            Err(_) => tracing::warn!(
+                held = ids.len(),
+                "partial itinerary hold dropped outside a runtime; it expires on TTL"
+            ),
+        }
+    }
 }
 
 impl HoldStore {
@@ -229,6 +305,10 @@ impl HoldStore {
     /// far are rolled back and `Ok(None)` is returned. This is what a
     /// round-trip (2 legs) or multi-city selection uses; a single seat is
     /// just a one-member itinerary.
+    ///
+    /// Rollback is a drop guard rather than an unwind at each early exit,
+    /// so it also covers the future being cancelled part-way — which is
+    /// what a client disconnect or the request timeout does.
     pub async fn acquire_itinerary(
         &self,
         seats: &[(Uuid, Uuid, SegmentSpan)],
@@ -236,17 +316,18 @@ impl HoldStore {
     ) -> Result<Option<ItineraryHold>, HoldError> {
         let group_id = Uuid::new_v4();
         let ttl_ms = ttl.as_millis() as i64;
+        let mut rollback = ItineraryRollback::new(self.clone());
         // (seat_hold_id, trip, unit)
         let mut acquired: Vec<(Uuid, Uuid, Uuid)> = Vec::with_capacity(seats.len());
         for (trip, unit, span) in seats {
+            // Both exits below — the `?` and the `return` — leave the guard
+            // armed, so it releases what was taken.
             match self.acquire(*trip, *unit, *span, ttl).await? {
-                Some(hold) => acquired.push((hold.hold_id, *trip, *unit)),
-                None => {
-                    for (seat_hold_id, _, _) in &acquired {
-                        let _ = self.release(*seat_hold_id).await;
-                    }
-                    return Ok(None);
+                Some(hold) => {
+                    rollback.record(hold.hold_id);
+                    acquired.push((hold.hold_id, *trip, *unit));
                 }
+                None => return Ok(None),
             }
         }
 
@@ -263,6 +344,10 @@ impl HoldStore {
             .arg(ttl_ms)
             .query_async(&mut conn)
             .await?;
+
+        // The group registry is written: these seats are reachable by one
+        // id now, so releasing them is the caller's business.
+        rollback.disarm();
 
         Ok(Some(ItineraryHold {
             hold_id: group_id,
@@ -322,7 +407,7 @@ impl HoldStore {
             return Ok(false);
         };
         for (seat_hold_id, _, _) in &members {
-            let _ = self.release(*seat_hold_id).await?;
+            self.release(*seat_hold_id).await?;
         }
         let mut conn = self.conn.clone();
         let _: () = conn.del(Self::itinerary_key(hold_id)).await?;
@@ -346,15 +431,30 @@ impl HoldStore {
         let members: Vec<String> = conn.smembers(Self::index_key(trip_id)).await?;
         let now = Utc::now().timestamp_millis();
 
-        let mut live = std::collections::HashMap::new();
+        // Parse first, then fetch every unit's hash in ONE round trip.
+        // Awaiting an HGETALL per member turned a seat map on a busy trip
+        // into N sequential round trips on an endpoint anyone can call.
+        let mut parsed: Vec<Uuid> = Vec::with_capacity(members.len());
         let mut stale: Vec<String> = Vec::new();
         for member in members {
-            let Ok(unit_id) = Uuid::parse_str(&member) else {
-                stale.push(member);
-                continue;
-            };
-            let fields: std::collections::HashMap<String, String> =
-                conn.hgetall(Self::unit_key(trip_id, unit_id)).await?;
+            match Uuid::parse_str(&member) {
+                Ok(unit_id) => parsed.push(unit_id),
+                Err(_) => stale.push(member),
+            }
+        }
+
+        let hashes: Vec<std::collections::HashMap<String, String>> = if parsed.is_empty() {
+            Vec::new()
+        } else {
+            let mut pipe = redis::pipe();
+            for unit_id in &parsed {
+                pipe.hgetall(Self::unit_key(trip_id, *unit_id));
+            }
+            pipe.query_async(&mut conn).await?
+        };
+
+        let mut live = std::collections::HashMap::with_capacity(parsed.len());
+        for (unit_id, fields) in parsed.into_iter().zip(hashes) {
             let mut union: u64 = 0;
             for value in fields.values() {
                 let mut parts = value.split(':');
@@ -367,7 +467,7 @@ impl HoldStore {
                 }
             }
             if union == 0 {
-                stale.push(member);
+                stale.push(unit_id.to_string());
             } else {
                 live.insert(unit_id, union);
             }

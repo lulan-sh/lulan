@@ -59,7 +59,11 @@ pub struct AdvanceTier {
 }
 
 /// Host-derived scalars for one priced line item.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// `Default` is the neutral input — one unit, one segment, no promo, no
+/// occupancy pressure — so callers and tests can name only the fields
+/// that matter to the case at hand.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RuleInput {
     /// Fare key (seat fare class or pool unit code).
     pub fare_key: String,

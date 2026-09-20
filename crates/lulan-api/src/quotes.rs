@@ -90,7 +90,7 @@ pub struct JourneyRequest {
 
 /// Itinerary shape (`journeys`) or the single-trip shape (`trip_id` +
 /// `items`) — a one-way is just a one-journey itinerary.
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct QuoteRequest {
     #[serde(default)]
     trip_id: Option<Uuid>,
@@ -135,7 +135,7 @@ pub fn normalize_journeys(
     }
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct QuoteResponse {
     currency: String,
     journey_count: u32,
@@ -148,7 +148,7 @@ pub struct QuoteResponse {
     quote_token: String,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct QuotedAncillary {
     code: String,
     name: String,
@@ -160,7 +160,7 @@ pub struct QuotedAncillary {
     total_minor: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct QuotedItem {
     trip_id: Uuid,
     unit_code: String,

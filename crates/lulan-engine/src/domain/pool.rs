@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::segment::SegmentSpan;
+use super::segment::{MAX_SEGMENTS, SegmentSpan};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum PoolError {
@@ -16,6 +16,12 @@ pub enum PoolError {
     ReleaseExceedsCapacity { requested: i32, capacity: i32 },
     #[error("quantity must be positive, got {0}")]
     NonPositiveQuantity(i32),
+    #[error("capacity must not be negative, got {0}")]
+    NegativeCapacity(i32),
+    #[error("{segments} segments exceeds the {MAX_SEGMENTS}-segment limit")]
+    TooManySegments { segments: usize },
+    #[error("stored remaining {remaining} exceeds capacity {capacity}")]
+    RemainingExceedsCapacity { remaining: i32, capacity: i32 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,7 +31,10 @@ pub struct PoolOccupancy {
 }
 
 impl PoolOccupancy {
-    /// A fresh pool: every segment starts at full capacity.
+    /// A fresh pool: every segment starts at full capacity. A negative
+    /// capacity is clamped to zero — a pool that sells nothing — rather
+    /// than rejected, because this constructor describes a layout rather
+    /// than replaying stored state.
     pub fn new(capacity: i32, segment_count: u8) -> Self {
         Self {
             capacity: capacity.max(0),
@@ -34,18 +43,42 @@ impl PoolOccupancy {
     }
 
     /// Rebuild from stored per-segment counters.
-    pub fn from_parts(capacity: i32, remaining: Vec<i32>) -> Self {
-        Self {
+    ///
+    /// Checked, because this is the only way into the type that does not
+    /// go through [`new`](Self::new), and everything downstream assumes
+    /// the invariants it establishes. In particular `remaining.len()` has
+    /// to fit a `u8`: [`segment_count`](Self::segment_count) returns one,
+    /// and a longer vector used to wrap silently, after which every span
+    /// bounds-check compared against the wrong number of segments.
+    pub fn from_parts(capacity: i32, remaining: Vec<i32>) -> Result<Self, PoolError> {
+        if capacity < 0 {
+            return Err(PoolError::NegativeCapacity(capacity));
+        }
+        if remaining.len() > MAX_SEGMENTS as usize {
+            return Err(PoolError::TooManySegments {
+                segments: remaining.len(),
+            });
+        }
+        if let Some(&over) = remaining.iter().find(|&&r| r > capacity) {
+            return Err(PoolError::RemainingExceedsCapacity {
+                remaining: over,
+                capacity,
+            });
+        }
+        Ok(Self {
             capacity,
             remaining,
-        }
+        })
     }
 
     pub fn capacity(&self) -> i32 {
         self.capacity
     }
 
+    /// Never truncates: the constructors reject anything past
+    /// [`MAX_SEGMENTS`].
     pub fn segment_count(&self) -> u8 {
+        debug_assert!(self.remaining.len() <= MAX_SEGMENTS as usize);
         self.remaining.len() as u8
     }
 
@@ -152,6 +185,32 @@ mod tests {
         assert!(!pool.is_available(span(0, 3), 2).unwrap());
         // The outer segments individually still have room.
         assert!(pool.is_available(span(0, 1), 10).unwrap());
+    }
+
+    /// `from_parts` is the only way in that skips `new`, so it has to
+    /// establish the same invariants rather than trust its caller.
+    #[test]
+    fn from_parts_refuses_state_the_type_cannot_represent() {
+        assert_eq!(
+            PoolOccupancy::from_parts(-1, vec![]),
+            Err(PoolError::NegativeCapacity(-1))
+        );
+        // Used to wrap to len % 256, after which every span bounds-check
+        // compared against the wrong segment count.
+        assert_eq!(
+            PoolOccupancy::from_parts(10, vec![10; 300]),
+            Err(PoolError::TooManySegments { segments: 300 })
+        );
+        assert_eq!(
+            PoolOccupancy::from_parts(5, vec![5, 9]),
+            Err(PoolError::RemainingExceedsCapacity {
+                remaining: 9,
+                capacity: 5
+            })
+        );
+        let pool = PoolOccupancy::from_parts(5, vec![5, 3]).unwrap();
+        assert_eq!(pool.segment_count(), 2);
+        assert_eq!(pool.remaining_for(span(0, 2)).unwrap(), 3);
     }
 
     #[test]

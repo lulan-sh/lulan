@@ -23,7 +23,7 @@ async fn main() -> anyhow::Result<()> {
         let url = config
             .database_url
             .context("DATABASE_URL is required for seeding")?;
-        let pool = connect(&url).await?;
+        let pool = connect(&url, config.db_pool).await?;
         // `seed events` seeds the arena/concert profile (its own ruleset);
         // `seed` seeds the ferry line. Same engine, different domain.
         if std::env::args().nth(2).as_deref() == Some("events") {
@@ -63,13 +63,13 @@ async fn main() -> anyhow::Result<()> {
         let url = config
             .database_url
             .context("DATABASE_URL is required for import")?;
-        let pool = connect(&url).await?;
+        let pool = connect(&url, config.db_pool).await?;
         lulan_api::gtfs::import(&pool, std::path::Path::new(dir), options).await?;
         return Ok(());
     }
 
     let db = match &config.database_url {
-        Some(url) => Some(connect(url).await?),
+        Some(url) => Some(connect(url, config.db_pool).await?),
         None => {
             tracing::warn!("DATABASE_URL not set — booting without a database");
             None
@@ -214,7 +214,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let quote_secret = std::sync::Arc::new(match (&config.quote_secret, &db) {
+    let quote_secret: std::sync::Arc<[u8]> = match (&config.quote_secret, &db) {
         (Some(secret), _) => {
             if secret.len() < MIN_QUOTE_SECRET_LEN {
                 anyhow::bail!(
@@ -223,7 +223,7 @@ async fn main() -> anyhow::Result<()> {
                      openssl rand -hex 32"
                 );
             }
-            secret.as_bytes().to_vec()
+            std::sync::Arc::from(secret.as_bytes())
         }
         (None, Some(_)) => anyhow::bail!(
             "LULAN_QUOTE_SECRET is required. It signs quote tokens and the retrieval \
@@ -234,7 +234,7 @@ async fn main() -> anyhow::Result<()> {
         // No database: an infra-less boot (health checks, CI smoke tests)
         // where nothing durable is signed anyway.
         (None, None) => lulan_api::state::ephemeral_secret(),
-    });
+    };
 
     // Make sure a signing key exists before serving. Issuance reads the
     // active key per ticket, so `POST /v1/admin/ticket-keys/rotate` takes
@@ -261,6 +261,8 @@ async fn main() -> anyhow::Result<()> {
         payments,
         quote_secret,
         identity,
+        limits: config.limits,
+        request_timeout_secs: config.request_timeout_secs,
     });
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
@@ -282,11 +284,7 @@ async fn connect_redis(url: &str) -> anyhow::Result<redis::aio::ConnectionManage
     Ok(client.get_connection_manager().await?)
 }
 
-async fn connect(url: &str) -> anyhow::Result<sqlx::PgPool> {
-    let max_connections = std::env::var("LULAN_DB_POOL")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(32);
+async fn connect(url: &str, max_connections: u32) -> anyhow::Result<sqlx::PgPool> {
     let pool = PgPoolOptions::new()
         .max_connections(max_connections)
         .acquire_timeout(std::time::Duration::from_secs(30))

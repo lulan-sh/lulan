@@ -28,6 +28,10 @@
 //!   a device that has never synced cannot know, and no amount of
 //!   cryptography changes that.
 
+// Every public type is inspectable: a request or response you cannot
+// put in a `tracing` field is one you cannot diagnose in production.
+#![warn(missing_debug_implementations)]
+
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
@@ -113,6 +117,31 @@ pub enum ValidationError {
 /// Signature-only: a ticket refunded after issuance still passes here.
 /// Gates should use [`verify_ticket_with_revocations`] with the list from
 /// their last sync.
+///
+/// # Examples
+///
+/// A gate holds the key set it cached while online, and a scanned token.
+/// Nothing else: no clock of its own, no network.
+///
+/// ```
+/// use lulan_validate::{KeyEntry, ValidationError, verify_ticket};
+///
+/// let keys: Vec<KeyEntry> = serde_json::from_str(
+///     r#"[{"kid": "lulan-2026", "public_key": "iojlYXHi6QMoY_ZjMxnH9BbfvDgNBaVrDJjpLHVmvoE"}]"#,
+/// )?;
+///
+/// // A token this key set cannot vouch for is rejected, not trusted.
+/// let err = verify_ticket("LT1.bm90LWEtdGlja2V0.c2ln", &keys, 1_800_000_000, None)
+///     .expect_err("a forged payload must not verify");
+/// assert!(matches!(err, ValidationError::Malformed | ValidationError::BadSignature));
+///
+/// // So is anything that is not a version-1 Lulan token at all.
+/// assert_eq!(
+///     verify_ticket("not-a-token", &keys, 1_800_000_000, None),
+///     Err(ValidationError::Malformed),
+/// );
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn verify_ticket(
     token: &str,
     keys: &[KeyEntry],

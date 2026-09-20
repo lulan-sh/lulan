@@ -12,7 +12,9 @@ use serde_json::json;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
-use crate::domain::{OrderEventType, OrderStatus, PassengerType, SegmentSpan, apply};
+use crate::domain::{
+    OrderEventType, OrderStatus, ParseEnumError, PassengerType, SegmentSpan, UnitKind, apply,
+};
 use crate::events;
 use crate::inventory::{
     InventoryStore, StoreError, claim_pool_exec, claim_seat_exec, release_pool_exec,
@@ -88,7 +90,7 @@ pub struct OrderAncillary {
 pub struct OrderItem {
     pub trip_id: Uuid,
     pub unit_code: String,
-    pub kind: String,
+    pub kind: UnitKind,
     pub from_index: u8,
     pub to_index: u8,
     pub quantity: i32,
@@ -185,7 +187,7 @@ pub enum TransitionOutcome {
     NotFound,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct OrderStore {
     pool: PgPool,
     inventory: InventoryStore,
@@ -245,7 +247,7 @@ impl OrderStore {
         // pools are order-level.
         let mut passenger_slots = Vec::with_capacity(items.len());
         for (item, target) in items.iter().zip(&targets) {
-            let slot = if target.kind == "seat" {
+            let slot = if target.kind == UnitKind::Seat {
                 let index = match item.passenger_index {
                     Some(index) => index,
                     None if passengers.len() == 1 => 0,
@@ -336,11 +338,11 @@ impl OrderStore {
 
         let mut recorded_items = Vec::with_capacity(items.len());
         for ((item, target), slot) in items.iter().zip(&targets).zip(&passenger_slots) {
-            let rows = match target.kind.as_str() {
-                "seat" => {
+            let rows = match target.kind {
+                UnitKind::Seat => {
                     claim_seat_exec(&mut *tx, item.trip_id, target.unit_id, target.span).await?
                 }
-                _ => {
+                UnitKind::Pool => {
                     if item.quantity <= 0 {
                         0
                     } else {
@@ -370,7 +372,7 @@ impl OrderStore {
             .bind(item.trip_id)
             .bind(target.unit_id)
             .bind(&item.unit_code)
-            .bind(&target.kind)
+            .bind(target.kind.as_str())
             .bind(i16::from(target.span.from_index()))
             .bind(i16::from(target.span.to_index()))
             .bind(item.quantity.max(1))
@@ -381,7 +383,7 @@ impl OrderStore {
             recorded_items.push(OrderItem {
                 trip_id: item.trip_id,
                 unit_code: item.unit_code.clone(),
-                kind: target.kind.clone(),
+                kind: target.kind,
                 from_index: target.span.from_index(),
                 to_index: target.span.to_index(),
                 quantity: item.quantity.max(1),
@@ -749,7 +751,9 @@ impl OrderStore {
         else {
             return Ok(TransitionOutcome::NotFound);
         };
-        let current = OrderStatus::parse(row.get::<String, _>(0).as_str())
+        let current = row
+            .get::<String, _>(0)
+            .parse::<OrderStatus>()
             .expect("orders.status CHECK constraint guarantees a known value");
 
         let Ok(next) = apply(Some(current), event) else {
@@ -792,10 +796,10 @@ impl OrderStore {
                 Ok(PassengerRecord {
                     id: r.try_get("id")?,
                     full_name: r.try_get("full_name")?,
-                    passenger_type: PassengerType::parse(
-                        r.get::<String, _>("passenger_type").as_str(),
-                    )
-                    .expect("passengers.passenger_type CHECK guarantees a known value"),
+                    passenger_type: r
+                        .get::<String, _>("passenger_type")
+                        .parse::<PassengerType>()
+                        .expect("passengers.passenger_type CHECK guarantees a known value"),
                     birthdate: r.try_get("birthdate")?,
                 })
             })
@@ -814,7 +818,10 @@ impl OrderStore {
                 Ok(OrderItem {
                     trip_id: r.try_get("trip_id")?,
                     unit_code: r.try_get("unit_code")?,
-                    kind: r.try_get("kind")?,
+                    kind: r
+                        .try_get::<String, _>("kind")?
+                        .parse()
+                        .map_err(|e: ParseEnumError| sqlx::Error::Decode(Box::new(e)))?,
                     from_index: r.try_get::<i16, _>("from_index")? as u8,
                     to_index: r.try_get::<i16, _>("to_index")? as u8,
                     quantity: r.try_get("quantity")?,
@@ -849,7 +856,9 @@ impl OrderStore {
             order_id,
             trip_ids: distinct_trips(&items),
             passenger_name: row.try_get("passenger_name")?,
-            status: OrderStatus::parse(row.get::<String, _>("status").as_str())
+            status: row
+                .get::<String, _>("status")
+                .parse::<OrderStatus>()
                 .expect("orders.status CHECK constraint guarantees a known value"),
             total_minor: row.try_get("total_minor")?,
             currency: row.try_get("currency")?,
@@ -870,7 +879,7 @@ impl OrderStore {
         }
         let mut state: Option<OrderStatus> = None;
         for event in &stream {
-            let event_type = OrderEventType::parse(&event.event_type).ok_or_else(|| {
+            let event_type = event.event_type.parse::<OrderEventType>().map_err(|_| {
                 StoreError::UnreplayableStream {
                     stream_id: order_id,
                     stream_seq: event.stream_seq,
@@ -917,13 +926,13 @@ async fn release_order_items(
     for row in items {
         let unit_id: Uuid = row.try_get("unit_id")?;
         let trip_id: Uuid = row.try_get("trip_id")?;
-        let kind: String = row.try_get("kind")?;
+        let kind: UnitKind = row.try_get::<String, _>("kind")?.parse()?;
         let from = row.try_get::<i16, _>("from_index")? as u8;
         let to = row.try_get::<i16, _>("to_index")? as u8;
         let span = SegmentSpan::new(from, to)?;
-        let released = match kind.as_str() {
-            "seat" => release_seat_exec(&mut **tx, trip_id, unit_id, span).await?,
-            _ => {
+        let released = match kind {
+            UnitKind::Seat => release_seat_exec(&mut **tx, trip_id, unit_id, span).await?,
+            UnitKind::Pool => {
                 let qty: i32 = row.try_get("quantity")?;
                 release_pool_exec(&mut **tx, trip_id, unit_id, span, qty).await?
             }
