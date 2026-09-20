@@ -113,8 +113,10 @@ pub async fn enroll_staff(
     Json(req): Json<EnrollStaffRequest>,
 ) -> Result<(StatusCode, Json<StaffRecord>), ApiError> {
     let pool = db(&state)?;
-    let role = StaffRole::parse(&req.role)
-        .ok_or_else(|| ApiError::BadRequest("role must be admin, ops, or support".into()))?;
+    let role = req
+        .role
+        .parse::<StaffRole>()
+        .map_err(|_| ApiError::BadRequest("role must be admin, ops, or support".into()))?;
     let issuer = req
         .issuer
         .or_else(|| std::env::var("LULAN_IDP_ISSUER").ok())
@@ -184,7 +186,10 @@ pub async fn list_staff(
                 subject: r.get("subject"),
                 email: r.get("email"),
                 display_name: r.get("display_name"),
-                role: StaffRole::parse(r.get::<String, _>("role").as_str()).expect("checked"),
+                role: r
+                    .get::<String, _>("role")
+                    .parse::<StaffRole>()
+                    .expect("staff.role CHECK guarantees a known value"),
                 active: r.get("active"),
             })
             .collect(),

@@ -117,6 +117,27 @@ pub struct JwksIdentity {
     keys: Arc<RwLock<jwk::JwkSet>>,
 }
 
+/// Why an IdP could not be wired up.
+///
+/// A concrete enum rather than a `String`, because these are three
+/// different operational situations and only the first is normal: no IdP
+/// configured (guest checkout), a misconfigured one, and one that is
+/// simply down right now. `provider_from_env` used to flatten all of them
+/// into `None` after a log line.
+#[derive(Debug, thiserror::Error)]
+pub enum IdentityConfigError {
+    #[error("identity: HTTP client could not be built: {0}")]
+    Client(#[source] reqwest::Error),
+    #[error("identity: could not fetch JWKS from {url}: {source}")]
+    Unreachable {
+        url: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("identity: {url} published an empty key set")]
+    NoKeys { url: String },
+}
+
 impl JwksIdentity {
     /// From `LULAN_IDP_ISSUER` + `LULAN_IDP_JWKS_URL`, if both are set.
     /// Optional `LULAN_IDP_AUDIENCE` pins the `aud` claim.
@@ -124,7 +145,7 @@ impl JwksIdentity {
     /// Fetches once before returning so a misconfigured URL fails at boot
     /// rather than at a customer's first sign-in, then keeps a refresher
     /// running for the process lifetime.
-    pub async fn from_env() -> Option<Result<Self, String>> {
+    pub async fn from_env() -> Option<Result<Self, IdentityConfigError>> {
         let issuer = std::env::var("LULAN_IDP_ISSUER").ok()?;
         let url = std::env::var("LULAN_IDP_JWKS_URL").ok()?;
         Some(Self::connect(issuer, url, std::env::var("LULAN_IDP_AUDIENCE").ok()).await)
@@ -134,16 +155,19 @@ impl JwksIdentity {
         issuer: String,
         jwks_url: String,
         audience: Option<String>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, IdentityConfigError> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
-            .map_err(|e| e.to_string())?;
-        let initial = fetch_jwks(&client, &jwks_url)
-            .await
-            .map_err(|e| format!("could not fetch {jwks_url}: {e}"))?;
+            .map_err(IdentityConfigError::Client)?;
+        let initial = fetch_jwks(&client, &jwks_url).await.map_err(|source| {
+            IdentityConfigError::Unreachable {
+                url: jwks_url.clone(),
+                source,
+            }
+        })?;
         if initial.keys.is_empty() {
-            return Err(format!("{jwks_url} published an empty key set"));
+            return Err(IdentityConfigError::NoKeys { url: jwks_url });
         }
         tracing::info!(keys = initial.keys.len(), %jwks_url, "identity: JWKS loaded");
 
@@ -167,17 +191,14 @@ impl JwksIdentity {
     }
 }
 
-async fn fetch_jwks(client: &reqwest::Client, url: &str) -> Result<jwk::JwkSet, String> {
+async fn fetch_jwks(client: &reqwest::Client, url: &str) -> Result<jwk::JwkSet, reqwest::Error> {
     client
         .get(url)
         .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .error_for_status()
-        .map_err(|e| e.to_string())?
+        .await?
+        .error_for_status()?
         .json::<jwk::JwkSet>()
         .await
-        .map_err(|e| e.to_string())
 }
 
 /// Keeps the cached set current. A failed refresh keeps the previous keys
@@ -194,7 +215,13 @@ async fn refresh_jwks(
     loop {
         ticker.tick().await;
         match fetch_jwks(&client, &url).await {
-            Ok(set) if !set.keys.is_empty() => *keys.write().unwrap() = set,
+            // Poisoning carries no information here: the set is replaced
+            // wholesale, so a panic elsewhere cannot have left it
+            // half-written. Unwrapping instead would kill this task —
+            // spawned, unsupervised — and freeze the key set forever.
+            Ok(set) if !set.keys.is_empty() => {
+                *keys.write().unwrap_or_else(|e| e.into_inner()) = set
+            }
             Ok(_) => tracing::warn!(%url, "JWKS refresh returned no keys; keeping the last set"),
             Err(err) => {
                 tracing::warn!(%url, error = %err, "JWKS refresh failed; keeping the last set")
@@ -230,7 +257,9 @@ impl IdentityProvider for JwksIdentity {
         let kid = header.kid?;
 
         let (key, algorithm) = {
-            let keys = self.keys.read().ok()?;
+            // Matches the refresh side: a poisoned lock must not turn
+            // into "every customer token is rejected".
+            let keys = self.keys.read().unwrap_or_else(|e| e.into_inner());
             let jwk = keys.find(&kid)?;
             // Trust the key's own algorithm, never the token header's:
             // taking `alg` from the token is how algorithm-confusion

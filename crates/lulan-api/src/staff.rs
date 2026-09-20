@@ -12,6 +12,7 @@
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
+use lulan_engine::domain::ParseEnumError;
 use serde::Serialize;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
@@ -28,20 +29,31 @@ pub enum StaffRole {
 }
 
 impl StaffRole {
-    pub fn as_str(&self) -> &'static str {
+    /// The stored form, matching the `staff.role` CHECK.
+    pub fn as_str(self) -> &'static str {
         match self {
             StaffRole::Admin => "admin",
             StaffRole::Ops => "ops",
             StaffRole::Support => "support",
         }
     }
+}
 
-    pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
+impl std::fmt::Display for StaffRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for StaffRole {
+    type Err = ParseEnumError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
             "admin" => StaffRole::Admin,
             "ops" => StaffRole::Ops,
             "support" => StaffRole::Support,
-            _ => return None,
+            other => return Err(ParseEnumError::new("StaffRole", other)),
         })
     }
 }
@@ -73,7 +85,9 @@ pub async fn resolve(state: &AppState, parts: &Parts) -> Result<Option<StaffMemb
     Ok(row.map(|r| StaffMember {
         staff_id: r.get("id"),
         display_name: r.get("display_name"),
-        role: StaffRole::parse(r.get::<String, _>("role").as_str())
+        role: r
+            .get::<String, _>("role")
+            .parse::<StaffRole>()
             .expect("staff.role CHECK guarantees a known value"),
     }))
 }

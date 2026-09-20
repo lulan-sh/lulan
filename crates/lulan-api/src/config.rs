@@ -34,9 +34,9 @@ pub struct Config {
 /// Read once at boot and carried, rather than re-read from the
 /// environment per request: `std::env::var` takes a process-wide lock and
 /// allocates, and doing it twice per request put that in the hot path of
-/// the rate limiter. Reading once also means a misspelled variable is a
-/// wrong value from the first request rather than a silent default
-/// forever.
+/// the rate limiter. Reading once also means a bad value is reported once
+/// at boot (see [`env_or`]) rather than being silently re-defaulted on
+/// every request.
 #[derive(Debug, Clone, Copy)]
 pub struct RuntimeLimits {
     /// `LULAN_RATE_LIMIT` — writes per minute per caller.
@@ -54,11 +54,18 @@ const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_DB_POOL: u32 = 32;
 
 /// Parse an env var, falling back when unset or unparseable.
-fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+///
+/// A value that does not parse is logged rather than silently defaulted:
+/// `LULAN_RATE_LIMIT=1O00` (letter O) is a typo nobody notices from the
+/// outside, because the server happily runs at the default instead.
+fn env_or<T: std::str::FromStr + std::fmt::Debug>(key: &str, default: T) -> T {
+    match std::env::var(key) {
+        Ok(raw) => raw.parse().unwrap_or_else(|_| {
+            tracing::warn!(key, %raw, ?default, "unparseable value; using the default");
+            default
+        }),
+        Err(_) => default,
+    }
 }
 
 impl Default for RuntimeLimits {

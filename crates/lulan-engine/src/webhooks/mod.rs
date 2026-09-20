@@ -198,9 +198,26 @@ pub async fn deliver_due(
         });
     }
 
+    // Drain every result, even if recording one fails.
+    //
+    // Returning early here would drop the JoinSet, which ABORTS the POSTs
+    // still in flight. Those receivers may already have been delivered to;
+    // aborting loses the outcome, and the reclaim then re-POSTs them. One
+    // transient database error would turn into a duplicate delivery of
+    // every other webhook in the batch. A row whose own record failed is
+    // left in_flight and retried, which is the at-least-once guarantee
+    // these deliveries already carry.
     while let Some(joined) = posts.join_next().await {
         match joined {
-            Ok((delivery, outcome)) => record(pool, &delivery, outcome, &mut stats).await?,
+            Ok((delivery, outcome)) => {
+                if let Err(err) = record(pool, &delivery, outcome, &mut stats).await {
+                    tracing::error!(
+                        delivery_id = delivery.id,
+                        error = %err,
+                        "recording a webhook delivery outcome failed; it will be retried"
+                    );
+                }
+            }
             // The row stays in_flight; reclaim_stale returns it to pending.
             Err(err) => tracing::error!(error = %err, "webhook delivery task failed"),
         }

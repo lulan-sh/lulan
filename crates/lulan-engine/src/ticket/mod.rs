@@ -98,6 +98,46 @@ mod serde_bytes_uuid {
     }
 }
 
+/// The `tickets.status` CHECK, parsed. A string with a `_` arm meant the
+/// gate silently reported any unrecognised status as a generic refusal;
+/// spelling the variants out makes adding one a compile error here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TicketStatus {
+    Issued,
+    Boarded,
+    Void,
+}
+
+impl TicketStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TicketStatus::Issued => "issued",
+            TicketStatus::Boarded => "boarded",
+            TicketStatus::Void => "void",
+        }
+    }
+}
+
+impl std::fmt::Display for TicketStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for TicketStatus {
+    type Err = crate::domain::ParseEnumError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "issued" => TicketStatus::Issued,
+            "boarded" => TicketStatus::Boarded,
+            "void" => TicketStatus::Void,
+            other => return Err(crate::domain::ParseEnumError::new("TicketStatus", other)),
+        })
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum TicketError {
     #[error("order is in state {0:?}; tickets require paid")]
@@ -678,7 +718,10 @@ impl TicketStore {
                 order_status: None,
             });
         };
-        let ticket_status: String = ticket.try_get("status")?;
+        let ticket_status: TicketStatus = ticket
+            .try_get::<String, _>("status")?
+            .parse()
+            .map_err(|e: crate::domain::ParseEnumError| sqlx::Error::Decode(Box::new(e)))?;
         let order_id: Uuid = ticket.try_get("order_id")?;
 
         let inserted = sqlx::query(
@@ -704,16 +747,19 @@ impl TicketStore {
             });
         }
 
-        if ticket_status != "issued" {
+        if ticket_status != TicketStatus::Issued {
             // Not boardable — but WHY matters at the gate, and these used
             // to be indistinguishable. A refunded ticket reported
             // "already_boarded", telling crew they were looking at a
             // duplicate scan when they were looking at a cancelled sale.
             // The journal row above is the post-hoc evidence either way.
-            let status = match ticket_status.as_str() {
-                "boarded" => "already_boarded",
-                "void" => "void",
-                _ => "not_boardable",
+            let status = match ticket_status {
+                TicketStatus::Boarded => "already_boarded",
+                TicketStatus::Void => "void",
+                // Unreachable: the outer check excludes it. Spelled out so
+                // a new variant breaks the build here rather than silently
+                // becoming a generic refusal at the gate.
+                TicketStatus::Issued => "not_boardable",
             };
             tx.commit().await?;
             return Ok(ScanOutcome {

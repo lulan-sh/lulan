@@ -17,7 +17,9 @@ pub struct ParseEnumError {
 }
 
 impl ParseEnumError {
-    pub(crate) fn new(expected: &'static str, value: &str) -> Self {
+    /// Public so crates outside the engine can give their own
+    /// CHECK-backed enums the same `FromStr` error.
+    pub fn new(expected: &'static str, value: &str) -> Self {
         Self {
             expected,
             value: value.to_string(),

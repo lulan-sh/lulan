@@ -672,10 +672,13 @@ impl OrderStore {
         let mut stats = CascadeStats::default();
         for row in &rows {
             let order_id: Uuid = row.try_get("id")?;
-            let status: String = row.try_get("status")?;
-            let outcome = match status.as_str() {
-                "locked" | "pending_payment" => self.cancel(order_id).await,
-                _ => {
+            let status: OrderStatus = row
+                .try_get::<String, _>("status")?
+                .parse()
+                .map_err(|e: ParseEnumError| sqlx::Error::Decode(Box::new(e)))?;
+            let outcome = match status {
+                OrderStatus::Locked | OrderStatus::PendingPayment => self.cancel(order_id).await,
+                OrderStatus::Paid | OrderStatus::Ticketed => {
                     // Money first, inventory second. A refund that did not
                     // happen must not free the seat, so we leave the order
                     // alone and let the next pass try again.
@@ -689,6 +692,19 @@ impl OrderStore {
                         continue;
                     }
                     self.refund(order_id).await
+                }
+                // The query selects only the four settleable states, so
+                // this is unreachable — spelled out rather than absorbed by
+                // a `_` arm, because the absorbing arm was the one that
+                // issued refunds.
+                other => {
+                    tracing::error!(
+                        %order_id,
+                        %other,
+                        "cancellation cascade selected an order it cannot settle"
+                    );
+                    stats.failed += 1;
+                    continue;
                 }
             };
             match outcome {
